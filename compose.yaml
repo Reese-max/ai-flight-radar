@@ -1,0 +1,21 @@
+services:
+  radar:
+    build: .
+    ports:
+      - "127.0.0.1:8787:8787"
+    environment:
+      DEPLOYMENT_MODE: public
+      API_KEY: ${API_KEY:?Set a randomly generated API_KEY with at least 32 characters}
+      AUTOSCAN_ENABLED: ${AUTOSCAN_ENABLED:-false}
+      SCAN_INTERVAL_SECONDS: ${SCAN_INTERVAL_SECONDS:-300}
+      SCAN_BATCH_SIZE: ${SCAN_BATCH_SIZE:-3}
+      SCAN_TIMEOUT_SECONDS: ${SCAN_TIMEOUT_SECONDS:-180}
+      DB_PATH: /app/data/flights.db
+      NTFY_ENABLED: "false"
+      TELEGRAM_ENABLED: "false"
+    volumes:
+      - radar-data:/app/data
+    restart: unless-stopped
+    stop_grace_period: 45s
+volumes:
+  radar-data:

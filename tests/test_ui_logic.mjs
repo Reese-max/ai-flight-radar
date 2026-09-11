@@ -1,0 +1,14 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {money,taipeiDate,addDays,isStale,hasBaseline,sourceURL,cleanWatches,filteredQuotes} from '../web/assets/logic.mjs';
+const base={id:'test',origin:'TPE',destination:'FUK',price_twd:6000,searched_at:'2026-09-11T01:00:00Z',depart_date:'2026-11-14',return_date:'2026-11-16',expired:false};
+test('unknown or zero price never becomes a free flight',()=>{for(const p of [0,-1,NaN,null,undefined,'6000'])assert.equal(money(p),'價格未知');assert.equal(money(6000),'NT$6,000');});
+test('Taipei date does not depend on server timezone',()=>assert.equal(taipeiDate(new Date('2026-09-10T18:00:00Z')),'2026-09-11'));
+test('calendar arithmetic crosses month/year boundaries',()=>assert.equal(addDays('2026-12-31',2),'2027-01-02'));
+test('quote TTL and malformed future timestamps',()=>{const now=Date.parse('2026-09-11T02:00:00Z');assert.equal(isStale(base,now),false);assert.equal(isStale({...base,expired:true},now),true);assert.equal(isStale({...base,searched_at:'2026-09-10T01:00:00Z'},now),true);assert.equal(isStale({...base,searched_at:'bad'},now),true);});
+test('discount requires sufficient and untruncated history',()=>{const q={...base,baseline_confident:true,baseline_twd:8000,prior_observed_days:5,drop_pct:25};assert.equal(hasBaseline(q),true);assert.equal(hasBaseline({...q,prior_observed_days:4}),false);assert.equal(hasBaseline({...q,history_truncated:true}),false);});
+test('source links only permit expected Google origin and path',()=>{assert.ok(sourceURL({source_url:'https://www.google.com/travel/flights?q=TPE'}));for(const u of ['javascript:alert(1)','https://evil.test','https://www.google.com.evil.test/travel/flights','https://www.google.com/travel/flights/evil','https://user@www.google.com/travel/flights'])assert.equal(sourceURL({source_url:u}),null);});
+test('watchlist storage is bounded and validated',()=>{assert.deepEqual(cleanWatches(null),[]);assert.equal(cleanWatches([{id:'1',name:'a',route:'TPE/FUK',budget:6000}]).length,1);assert.equal(cleanWatches([{id:'1',name:'a',route:'TPE/FUK',budget:-1}]).length,0);assert.equal(cleanWatches(Array.from({length:200},(_,i)=>({id:String(i),name:'x',route:'TPE/FUK',budget:1}))).length,100);});
+test('weekend and leave modes use actual weekday counting',()=>{assert.equal(filteredQuotes([base],'leave',false,'price').length,1);assert.equal(filteredQuotes([{...base,depart_date:'2026-11-13'}],'leave',false,'price').length,0);assert.equal(filteredQuotes([{...base,depart_date:'2026-11-13'}],'weekend',false,'price').length,1);});
+test('city grouping deduplicates Tokyo airports',()=>{const qs=[{...base,destination:'NRT'},{...base,destination:'HND',price_twd:8000}];assert.equal(filteredQuotes(qs,'cities',false,'price',[{code:'NRT',city:'東京'},{code:'HND',city:'東京'}]).length,1);});
+test('history-only filter never includes cold start',()=>assert.equal(filteredQuotes([base],'all',true,'price').length,0));

@@ -1,7 +1,7 @@
 name: Quality checks
 on:
   push:
-    branches: [main, 'fix/price-integrity-*']
+    branches: [main, 'fix/price-integrity-*', 'feat/figma-ui-*']
   pull_request:
   workflow_dispatch:
 permissions:
@@ -17,14 +17,69 @@ jobs:
       NTFY_ENABLED: 'false'
       TELEGRAM_ENABLED: 'false'
       API_HOST: '127.0.0.1'
+      DEPLOYMENT_MODE: local
+      UI_SCREENSHOTS_DIR: ui-test-artifacts
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pip check
-      - run: python -m compileall -q ai api config core engine notifier providers main.py
+      - run: python -m compileall -q ai api config core engine notifier providers deploy main.py
       - run: python -m pytest -q
+      - run: node --test tests/test_ui_logic.mjs
       - run: python main.py --help
+      - run: python -m pip install 'playwright>=1.49,<2'
+      - run: python -m playwright install --with-deps chromium
+      - run: python tests/browser_smoke.py
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ui-browser-checks
+          path: ui-test-artifacts/*.png
+          retention-days: 7
+          if-no-files-found: warn
+  container-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build deployable image
+        run: docker build -t radar:test .
+      - name: Public-mode startup, assets, auth and non-root smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEY="$(openssl rand -hex 32)"
+          echo "::add-mask::$KEY"
+          docker volume create radar-test-data
+          docker run -d --name radar-smoke -p 127.0.0.1:8787:8787 \
+            -e API_KEY="$KEY" -e AUTOSCAN_ENABLED=false \
+            -v radar-test-data:/app/data radar:test
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /tmp/radar-health.json; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8787/api/ui/config
+          curl -fsS http://127.0.0.1:8787/assets/app.js > /dev/null
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+            -d '{}' http://127.0.0.1:8787/api/scan/trigger)" = 401
+          test "$(docker exec radar-smoke id -u)" = 10001
+          docker restart radar-smoke
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8787/api/health > /dev/null; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8787/api/ui/quotes
+      - name: Logs and cleanup
+        if: always()
+        run: |
+          docker logs radar-smoke || true
+          docker rm -f radar-smoke || true
+          docker volume rm radar-test-data || true

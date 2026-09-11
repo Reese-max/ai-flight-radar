@@ -1,18 +1,17 @@
 # AI Flight Radar
 
-台灣出發的機票報價搜尋、歷史觀測與低價提醒原型。核心原則是：**先確定比較方式正確，再宣稱發現便宜票。**
+台灣出發的機票報價觀測工作台。**先確定比較方式正確，再宣稱發現便宜票。**
 
-目前使用 `fast-flights 3.1.0` 取得 Google Flights 搜尋結果、SQLite/SQLModel 保存資料、FastAPI 提供既有網頁介面，以及 ntfy/Telegram 發送選擇性通知。只有一個實際機票資料來源；NLP 與摘要目前是規則式程式，不是已接上大型語言模型的自主 Agent。
+Figma UI 2.0 已實作為響應式網頁：桌面與手機導覽、報價篩選、日期比較、票價詳情、瀏覽器追蹤清單，以及管理員查價設定。FastAPI/SQLite 後端保留原有價格快照與通知規則。程式可使用 Docker 部署；**儲存庫有部署設定不代表已建立公開網站，正式上線需要雲端服務、持久卷及 HTTPS 網域驗收。**
 
-## 安裝與啟動
+## 安裝與本機啟動
 
-建議 Python 3.12。以下指令在儲存庫根目錄執行：
+建議 Python 3.12，在儲存庫根目錄執行：
 
 ```bash
 python -m venv .venv
-# Linux / macOS / WSL
 source .venv/bin/activate
-# Windows PowerShell 改用：.venv\Scripts\Activate.ps1
+# Windows PowerShell：.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 cp .env.example .env
 # Windows PowerShell：Copy-Item .env.example .env
@@ -22,65 +21,75 @@ python main.py scan --count 3
 python main.py server
 ```
 
-瀏覽 `http://127.0.0.1:8787`。需要持續追蹤時，在另一個終端機執行 `python main.py loop`；啟動網頁伺服器**不等於**已啟動持續掃描。WSL/Linux 也能使用 `./run-radar.sh init|status|scan|loop|server`。
+瀏覽 `http://127.0.0.1:8787`。本機需要持續掃描時，在另一個終端機執行 `python main.py loop`。WSL/Linux 可用 `./run-radar.sh init|status|scan|loop|server`。網頁重新整理與自然語言搜尋只讀取已觀測資料，不自動掃描航空來源。
 
-`scan --count 3` 最多處理三個可執行任務；沒有到期任務就結束，不會為湊足次數無限等待。外部搜尋仍需要可用網路，並可能因來源改版、限流或查無航班失敗。
+`scan --count 3` 最多處理三個可執行任務；沒有到期任務就結束。來源可能因改版、限流、網路問題或沒有結果而失敗。首次啟動沒有報價時，不以示範機票填滿頁面。
 
-## 這次的價格可信度修正
+## 網站功能與實作邊界
 
-每次成功搜尋保留所有原始 offer，但只新增**一筆最低價快照**作為統計輸入。相同航線、出發日、回程日、幣別、旅客數、艙等、直飛條件與來源才會共用比較基準。先在每天內取快照中位數，再以觀測日等權平均，避免高頻追蹤某一天改變其統計權重。
+| 功能 | 實際行為 |
+| --- | --- |
+| 探索低價 | 顯示每組查詢的最新真實快照，再套用預算與有效期 |
+| 日期比較 | 不同出發／回程日期組合的報價，不是假裝成時間序列 |
+| 票價詳情 | 顯示來源、觀測時間、歷史依據；行李與最終總價未知時明示 |
+| 自然語言 | 既有規則解析，先由使用者核對條件，不是已接 LLM 的自主 Agent |
+| 追蹤清單 | 儲存在目前瀏覽器，無跨裝置同步，不會建立伺服器排程或推播 |
+| 手動查價 | 一次提交一個任務；公網模式限管理員金鑰及每分鐘一次 |
+| 程序狀態 | 依真正心跳檔顯示；成功抓票需另外看到新資料庫快照 |
 
-本批價格不加入自己的比較基準。近 30 日內不足五個不同觀測日，不產生歷史降幅優惠；空白歷史不再填入人工預設的「市場均價」。`90D_LOW` 另要求長期間及足夠觀測日，不能靠幾筆資料宣稱 90 日新低。30/90 日重疊窗口不再重複加分。
+目前只有一個實際航空報價來源：`fast-flights 3.1.0` 取得 Google Flights 搜尋資料。多 Provider 與私人雲端追蹤仍在路線圖，不把計畫寫成已完成。
 
-行李、附加費與完整往返航段未經確認，不能由航空公司名稱推定含托運。未知時間不加分。分數仍以 100 為名目上限，但未驗證的行李部分保留 5 分、不送分，因此目前最高 95 分。
+## 價格判斷
 
-完整定義及限制見 [價格判斷方法](docs/PRICE_INTELLIGENCE.md)。
+每次成功搜尋保存原始 offers，但統計只使用一筆最低價快照。相同航線、出發日、回程日、來源、幣別、旅客數、艙等及直飛條件才共用基準。每日先取快照中位數，再以觀測日等權平均；本批價格不加入自己的比較基準。
 
-## 舊版升級
+近 30 日不足五個不同先前觀測日，不產生歷史降幅。90 日新低另有覆蓋門檻，不能靠少量資料宣稱。人工預設市場均價已取消，未知時間不加分，不由航空公司名稱推定托運行李。報價最多作六小時有效觀測，不保證期間仍可買到。
 
-先停止舊 worker，備份 `data/flights.db`（自訂 `DB_PATH` 則備份該檔案），更新程式與依賴，再執行 `python main.py init`。
+詳見 [價格判斷方法](docs/PRICE_INTELLIGENCE.md)。
 
-升級只新增 `search_snapshots`、`task_leases`、`radar_migrations` 三張表，不刪除原始查價或成功通知歷史。首次升級會把舊算法的 active deals 標為 expired、清空舊統計摘要，要求新方法重新產生證據；不會重複清空後續產生的新優惠。**舊 offer 不會冒充新方法收集到的快照，需重新累積觀測日。**
+## Docker 與雲端
 
-## 通知與安全
+新增 `deploy/start.py`：同一服務管理 Web 與可選的 bounded scanner，共用持久化 SQLite。支援平台 `PORT`、啟動健康檢查、SIGTERM 關閉、有限批次與超時。公網部署缺少至少 32 字元的管理金鑰時拒絕啟動。
 
-ntfy 預設關閉。請在 `.env` 設定自己的 topic，再明確設定 `NTFY_ENABLED=true`；不要共用舊示範 topic。難猜的 topic 名稱不等於存取控制，私人通知應使用受保護／保留的 topic 或自行架設有權限設定的服務。
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+# 將結果寫入本機 .env 的 API_KEY，不提交 GitHub。
+docker compose up --build -d
+```
 
-Telegram 需設定 `TELEGRAM_ENABLED=true`、`TELEGRAM_BOT_TOKEN` 與 `TELEGRAM_CHAT_ID`。`.env`、資料庫及金鑰檔不應推送到 GitHub。
+Compose 預設綁定本機，通知與自動掃描均關閉。Railway 使用根目錄 Dockerfile、`/app/data` 持久卷、單一副本及 HTTPS 網域；不能只部署靜態 HTML 就宣稱查價後端已上線。
 
-兩個通知渠道都失敗時，不會標記為已通知；至少一個成功才啟動既有冷卻規則。部分渠道失敗的獨立重試仍列在後續工作。
+完整設定、費用確認、Volume 權限及上線驗收見 [部署文件](docs/DEPLOYMENT.md)。
 
-API 預設只監聽本機。設定 `API_KEY` 後，手動觸發掃描 API 需要 `X-API-Key` header。既有網頁尚無 API key 輸入介面；設定金鑰後，應以授權 API 客戶端觸發，或由可信反向代理處理。對外服務前還需 HTTPS、認證、全域限流及前端安全檢查，不能把這個本機原型直接視為公開 SaaS。
+## 舊版升級與通知安全
 
-## 排程與有效期
+先停止舊 worker，備份 `data/flights.db`（自訂 DB_PATH 則備份該檔案），再更新依賴並執行 `python main.py init`。原價格可信度升級只新增快照／租約／migration 表，保留原始查價與成功通知歷史。首次遷移會使舊算法的有效優惠過期並重建統計；舊 offers 不冒充新方法的快照。此 UI 更新不刪除既有價格資料。
 
-四層追蹤間隔維持 6 小時／2 小時／1 小時／30 分鐘；加入每任務 15 分鐘租約，防止同一任務被兩個程序同時處理。失敗至少延遲 10 分鐘再嘗試。租約不是無限長鎖；超長請求及多 worker 全域流量預算仍需後續補強，目前建議一個持續掃描 worker。
+ntfy 與 Telegram 預設關閉，需在伺服器環境變數明確啟用並設定自己的接收對象。不要共用公開示範 topic。兩個渠道都失敗時不標為已通知；個別渠道的獨立重試仍待補強。`.env`、資料庫與憑證不得推送 GitHub。
 
-報價最長顯示 6 小時，超時或出發日期已過不再列為有效優惠。這是資料新鮮度規則，不是保證六小時內仍可購買。預設是抽樣掃描，不是窮舉日本所有航線與日期。
+公網金鑰只在本次分頁記憶體使用，不放 URL 或永久瀏覽器儲存。API 不向前端提供 Bot Token、Chat ID 或私人 topic。對外服務仍需平台流量防护；目前不是完整多租戶 SaaS。
 
 ## 測試
 
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-python -m compileall -q ai api config core engine notifier providers main.py
+node --test tests/test_ui_logic.mjs
+# 選用瀏覽器測試：
+python -m pip install playwright
+python -m playwright install chromium
+python tests/browser_smoke.py
 ```
 
-測試使用獨立臨時 SQLite、假的報價與假的通知回傳，不會發送真實通知、下單或用真實票價作固定斷言。CI 檢查依賴、語法、統計、資料庫、通知狀態、API 與 `fast-flights` v3 呼叫介面；不代表 Google Flights 線上抓取永遠可用。
+CI 包含原有測試、UI/API 測試、Node 顯示邏輯、瀏覽器模擬與 Docker 建置／啟動檢查。測試使用臨時資料庫與合成 API 回應，不送真實通知、不購票，也不以模擬票價作為正式網站資料。通過 CI 不代表上游 Google Flights 永遠可用。
 
-## Docker（選用）
+## 文件與設計
 
-```bash
-docker build -t ai-flight-radar .
-docker run --rm -p 127.0.0.1:8787:8787 -v radar-data:/app/data ai-flight-radar
-```
+- [Figma 設計](https://www.figma.com/design/JPE9g17smfFB6R7eKxjRDr?node-id=6-2)
+- [UI 實作、資產來源與功能邊界](docs/UI_IMPLEMENTATION.md)
+- [部署與維運](docs/DEPLOYMENT.md)
+- [已知開源專案與工具：目的、採用狀態、限制](docs/OPEN_SOURCE_STACK.md)
+- [價格判斷方法](docs/PRICE_INTELLIGENCE.md)
+- [後續路線圖](docs/ROADMAP.md)
 
-此命令只啟動本機可存取的網頁服務，不自動啟用通知或掃描。映像提供建置定義；請在部署環境自行確認 Docker 建置及網路條件。
-
-## 文件
-
-- [已知開源專案與工具：用途、採用狀態、限制](docs/OPEN_SOURCE_STACK.md)
-- [價格快照、統計與升級設計](docs/PRICE_INTELLIGENCE.md)
-- [後續路線圖與驗收標準](docs/ROADMAP.md)
-
-原儲存庫尚未提供專案 LICENSE；此次不代替作者決定授權。公開可讀不代表可以忽略授權，引用相依專案仍需遵守各自條款。
+原儲存庫尚未提供專案 LICENSE；本次不代替作者決定授權。公開可讀不等於可忽略授權，引用相依專案仍需遵守各自條款。

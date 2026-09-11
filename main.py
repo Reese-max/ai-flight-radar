@@ -87,7 +87,7 @@ def cmd_loop():
 def cmd_server():
     init_db()
     console.print(f"[bold green]Starting Web Server at http://{settings.API_HOST}:{settings.API_PORT} ...[/bold green]")
-    uvicorn.run("api.app:app", host=settings.API_HOST, port=settings.API_PORT, reload=False)
+    uvicorn.run("api.site:app", host=settings.API_HOST, port=settings.API_PORT, reload=False)
 
 def cmd_nlp(query: str):
     console.print(f"[bold cyan]Query:[/bold cyan] {query}")
