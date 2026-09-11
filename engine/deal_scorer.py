@@ -1,133 +1,78 @@
-import json
-from typing import Dict, Tuple, List
-from providers.base import StandardFlightOffer
-from engine.analyzer import PriceAnalyzer
+"""Explainable ranking; unknown history, times and baggage never earn evidence points."""
+from typing import Dict, List, Tuple
 from config.routes import JAPAN_AIRPORTS, TAIWAN_AIRPORTS
+from providers.base import StandardFlightOffer
+
+
+def _hour(value):
+    try:
+        hour, minute = map(int, value.split(":"))
+        return hour if 0 <= hour <= 23 and 0 <= minute <= 59 else None
+    except (ValueError, AttributeError, TypeError):
+        return None
+
 
 class DealScorer:
     @staticmethod
-    def evaluate(offer: StandardFlightOffer, ref_stats: Dict[str, float]) -> Tuple[int, str, List[str], float]:
-        """
-        Evaluates an offer against historical statistics and route characteristics.
-        Returns:
-            - deal_score (0~100)
-            - deal_level ("EXCEPTIONAL_DEAL" | "90D_LOW" | "GREAT_DEAL" | "NORMAL")
-            - reasons (List[str] of explainable highlights)
-            - drop_pct (Percentage drop compared to 30d baseline)
-        """
+    def evaluate(offer: StandardFlightOffer, ref_stats: Dict) -> Tuple[int, str, List[str], float]:
         price = offer.price_twd
-        avg_30d = ref_stats["avg_30d"]
-        avg_90d = ref_stats["avg_90d"]
-        min_hist = ref_stats["min_historical"]
-        
-        # Calculate drop percentage relative to 30-day average
-        drop_pct = round(((avg_30d - price) / avg_30d) * 100.0, 1) if avg_30d > 0 else 0.0
+        if price <= 0:
+            raise ValueError("Price must be positive")
         reasons: List[str] = []
-        score = 0
-
-        # 1. 價格絕對值競爭力 (0 ~ 25 分)
-        if price <= 5500:
-            score += 25
-            reasons.append(f"極致低價 (NT${price:,})")
-        elif price <= 7500:
-            score += 21
-            reasons.append(f"超值甜甜價 (NT${price:,})")
-        elif price <= 9500:
-            score += 17
-        elif price <= 12000:
-            score += 12
-        elif price <= 15000:
-            score += 7
+        score = next(points for limit, points in
+                     [(5500, 25), (7500, 21), (9500, 17), (12000, 12),
+                      (15000, 7), (float("inf"), 2)] if price <= limit)
+        reasons.append(f"本次搜尋最低報價 NT${price:,}；以供應商最終確認為準")
+        enough = bool(ref_stats.get("sufficient_history"))
+        avg30 = ref_stats.get("avg_30d") or 0
+        avg90 = ref_stats.get("avg_90d") or 0
+        minimum = ref_stats.get("min_historical")
+        drop = round((avg30 - price) / avg30 * 100, 1) if enough and avg30 > 0 else 0.0
+        observed = ref_stats.get("observed_days", 0)
+        if not enough:
+            reasons.append(f"歷史資料不足（近30日內僅{observed}個觀測日），不判定歷史折扣")
         else:
-            score += 2
-
-        # 2. 相較 30 日平均降幅 (0 ~ 25 分)
-        if drop_pct >= 35.0:
-            score += 25
-            reasons.append(f"比近 30 日均價大降 {drop_pct}%")
-        elif drop_pct >= 25.0:
-            score += 20
-            reasons.append(f"比近 30 日均價降幅 {drop_pct}%")
-        elif drop_pct >= 15.0:
-            score += 14
-            reasons.append(f"比近 30 日均價降 {drop_pct}%")
-        elif drop_pct > 0:
-            score += 7
-        else:
-            score += 0
-
-        # 3. 相較 90 日平均降幅 (0 ~ 15 分)
-        drop_90d = round(((avg_90d - price) / avg_90d) * 100.0, 1) if avg_90d > 0 else 0.0
-        if drop_90d >= 30.0:
-            score += 15
-        elif drop_90d >= 15.0:
-            score += 10
-        elif drop_90d > 0:
-            score += 5
-
-        # 4. 是否為歷史新低或逼近新低 (0 ~ 10 分)
-        if price <= min_hist and not ref_stats.get("is_cold_start", False):
-            score += 10
-            reasons.append("創歷史最低價記錄")
-        elif price <= min_hist * 1.05:
-            score += 6
-            reasons.append("逼近歷史低點")
-
-        # 5. 直飛 vs 轉機 (0 ~ 10 分)
+            if drop >= 35:
+                score += 40
+            elif drop >= 25:
+                score += 32
+            elif drop >= 15:
+                score += 22
+            elif drop > 0:
+                score += 10
+            reasons.append(f"相同日期查詢，低於近30日內{observed}個觀測日基準 {drop}%")
+            # Overlapping 30/90-day windows do not earn duplicate discount points.
+            if minimum is not None and price < minimum:
+                score += 10
+                reasons.append("低於本系統此前觀測到的最低價；非全市場歷史最低")
+            elif minimum is not None and price <= minimum * 1.05:
+                score += 6
+                reasons.append("接近本系統觀測低點")
         if offer.is_direct:
             score += 10
-            reasons.append("直飛不轉機")
+            reasons.append("搜尋條件為直飛；往返細節仍須於訂票頁確認")
         elif offer.stops == 1:
             score += 3
-        else:
-            score += 0
-
-        # 6. 航班時間友善度 (0 ~ 5 分)
-        # 扣分：紅眼航班 (出發 00:00~06:30 或 抵達 > 23:00)
-        is_red_eye = False
-        if offer.depart_time_str:
-            try:
-                hour = int(offer.depart_time_str.split(":")[0])
-                if 0 <= hour < 6:
-                    is_red_eye = True
-            except Exception:
-                pass
-        
-        if is_red_eye:
-            score += 0
-            reasons.append("注意：此航班為清晨/紅眼班機")
-        else:
+        dep, arr = _hour(offer.depart_time_str), _hour(offer.arrival_time_str)
+        if dep is not None and arr is not None and 6 <= dep < 23 and 6 <= arr < 23:
             score += 5
-            reasons.append("日間優質時段航班")
-
-        # 7. 機場便利性 (0 ~ 5 分)
-        # 例如羽田 (HND)、松山 (TSA)、福岡 (FUK 距市區僅 15 分鐘)
-        dest_airport = JAPAN_AIRPORTS.get(offer.destination)
-        orig_airport = TAIWAN_AIRPORTS.get(offer.origin)
-        if (dest_airport and dest_airport.is_downtown) or (orig_airport and orig_airport.is_downtown):
-            score += 5
-            reasons.append(f"市區型便利機場 ({offer.origin}/{offer.destination})")
+            reasons.append("已取得的航段起降時間非深夜")
+        elif dep is None or arr is None:
+            reasons.append("部分起降時間未知，不加時段分")
         else:
-            score += 3
-
-        # 8. 航空公司加分 (0 ~ 5 分)
-        fsc_airlines = ["中華航空", "長榮航空", "星宇航空", "日本航空", "全日空航空"]
-        if any(fsc in offer.primary_airline for fsc in fsc_airlines):
-            score += 5
-            reasons.append(f"傳統全服務航空含托運 ({offer.primary_airline})")
-        else:
-            score += 2
-
+            reasons.append("注意深夜或清晨起降時間")
+        airports = [JAPAN_AIRPORTS.get(offer.destination), TAIWAN_AIRPORTS.get(offer.origin)]
+        score += 5 if any(a and a.is_downtown for a in airports) else 3
+        # Airline brand does not establish a particular fare's baggage allowance.
+        reasons.append("行李、票種及附加費未驗證；不依航空公司名稱推定含托運")
         score = min(100, max(0, score))
-
-        # Determine Deal Level
-        if drop_pct >= 40.0 or (score >= 90 and price <= 8000):
-            deal_level = "EXCEPTIONAL_DEAL"
-        elif price <= min_hist and drop_pct >= 25.0:
-            deal_level = "90D_LOW"
-        elif drop_pct >= 20.0 or score >= 75:
-            deal_level = "GREAT_DEAL"
-        else:
-            deal_level = "NORMAL"
-
-        return score, deal_level, reasons, drop_pct
+        level = "NORMAL"
+        if enough:
+            if drop >= 40 or (score >= 90 and price <= 8000):
+                level = "EXCEPTIONAL_DEAL"
+            elif (ref_stats.get("has_90d_coverage") and ref_stats.get("min_90d") is not None
+                  and price < ref_stats["min_90d"] and drop >= 25):
+                level = "90D_LOW"
+            elif drop >= 20 or score >= 75:
+                level = "GREAT_DEAL"
+        return score, level, reasons, drop

@@ -1,0 +1,10 @@
+# Application dependencies. fast-flights v2 and v3 have incompatible APIs.
+fast-flights==3.1.0
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+sqlmodel>=0.0.22,<0.1
+pydantic>=2.7,<3
+httpx>=0.27,<0.29
+rich>=13,<15
+python-dotenv>=1,<2
+tzdata>=2024.1

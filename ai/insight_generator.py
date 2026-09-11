@@ -1,45 +1,37 @@
+"""Deterministic summary of fresh observations, not a live-agent status claim."""
 import json
-from typing import List, Dict
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 from sqlmodel import Session, select
 from core.database import engine
 from core.models import Deal
-from config.routes import TAIWAN_AIRPORTS, JAPAN_AIRPORTS
+from config.settings import settings
+
 
 class DealInsightGenerator:
     @staticmethod
     def generate_daily_briefing() -> str:
-        """
-        Generates the "Today's Top Flight Deals Intelligence" summary.
-        Answers: 今天有什麼最值得買？
-        """
+        cutoff = datetime.utcnow() - timedelta(hours=settings.DEAL_MAX_AGE_HOURS)
+        today = datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
         with Session(engine) as session:
-            stmt = select(Deal).where(Deal.status == "active").order_by(Deal.deal_score.desc()).limit(5)
-            top_deals = session.exec(stmt).all()
-
-            if not top_deals:
-                return "📡 今日雷達掃描中：目前暫無達到高評分 (Score >= 75) 的異常低價航班，雷達正持續全天候監控中。"
-
-            briefing_lines = ["✈️ 【AI Flight Radar 今日超值神價情報】\n"]
-            for i, deal in enumerate(top_deals, 1):
-                orig = TAIWAN_AIRPORTS.get(deal.origin)
-                orig_str = orig.city if orig else deal.origin
-                dest = JAPAN_AIRPORTS.get(deal.destination)
-                dest_str = dest.city if dest else deal.destination
-                
-                try:
-                    reasons = json.loads(deal.reasons)
-                    reasons_str = "、".join(reasons[:3])
-                except Exception:
-                    reasons_str = "大降幅特惠"
-
-                icon = "🔥" if deal.deal_score >= 85 else "✨"
-                briefing_lines.append(
-                    f"{icon} {i}. {orig_str} ➔ {dest_str} ({dest.name if dest else deal.destination})\n"
-                    f"   💰 票價：NT${deal.price_twd:,} (比基準均價 ↓{deal.drop_pct}%)\n"
-                    f"   🎯 Deal Score：{deal.deal_score} / 100\n"
-                    f"   📅 日期：{deal.depart_date} ~ {deal.return_date} ({deal.duration_days} 天)\n"
-                    f"   ✈️ 航空：{deal.airline} (直飛)\n"
-                    f"   💡 特點：{reasons_str}\n"
-                )
-
-            return "\n".join(briefing_lines)
+            deals = session.exec(select(Deal).where(
+                Deal.status == "active", Deal.deal_score >= 75,
+                Deal.created_at >= cutoff, Deal.depart_date >= today,
+            ).order_by(Deal.deal_score.desc()).limit(5)).all()
+        if not deals:
+            return "目前沒有足夠歷史證據且仍在有效期內的高評分報價。請確認排程是否正在執行；新安裝需先累積觀測資料。"
+        lines = ["AI Flight Radar 近期報價摘要（規則式整理，非訂票保證）"]
+        for index, deal in enumerate(deals, 1):
+            try:
+                reasons = json.loads(deal.reasons)
+                reasons = reasons if isinstance(reasons, list) else []
+            except (TypeError, ValueError):
+                reasons = []
+            lines.append(
+                f"{index}. {deal.origin} → {deal.destination}：NT${deal.price_twd:,}\n"
+                f"日期：{deal.depart_date} 至 {deal.return_date}；航空：{deal.airline}\n"
+                f"評分：{deal.deal_score}/100；觀測時間（UTC）：{deal.created_at.isoformat()}\n"
+                + "；".join(str(reason) for reason in reasons[:3])
+            )
+        lines.append("購買前仍須確認最新價格、去回航段、行李及附加費。")
+        return "\n\n".join(lines)

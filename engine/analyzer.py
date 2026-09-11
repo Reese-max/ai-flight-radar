@@ -1,142 +1,76 @@
-import logging
-from datetime import datetime, timedelta
-from typing import Optional, Dict
-from sqlmodel import Session, select, func
-from core.models import FlightSearchRecord, RouteStats
+"""Price references come from recorded search minima, never invented benchmarks."""
+from datetime import datetime
+from sqlmodel import Session, select
 from core.database import engine
+from core.models import RouteStats
+from core.snapshots import SearchSnapshot
+from engine.price_history import query_key, summarize_history
 
-logger = logging.getLogger(__name__)
-
-# Realistic Taiwan -> Japan Market Benchmark Baseline (TWD round-trip)
-# Used as cold-start baseline before long-term historical records accumulate
-DEFAULT_ROUTE_BENCHMARKS: Dict[str, int] = {
-    "TPE-NRT": 13000,
-    "TPE-HND": 14500,
-    "TSA-HND": 15500,
-    "TPE-KIX": 12500,
-    "TPE-FUK": 11500,
-    "TPE-OKA": 9000,
-    "TPE-NGO": 11800,
-    "TPE-CTS": 16500,
-    "TPE-SDJ": 13500,
-    "TPE-KMJ": 11000,
-    "TPE-KOJ": 12000,
-    "TPE-OKJ": 11500,
-    "TPE-TAK": 11500,
-    "KHH-NRT": 13500,
-    "KHH-KIX": 13000,
-    "KHH-FUK": 12000,
-    "KHH-OKA": 9500,
-}
 
 class PriceAnalyzer:
     @staticmethod
-    def get_benchmark_price(origin: str, destination: str) -> int:
-        key = f"{origin.upper()}-{destination.upper()}"
-        return DEFAULT_ROUTE_BENCHMARKS.get(key, 12000)
+    def get_reference_stats(origin: str, destination: str, duration_days: int,
+                            *, depart_date: str = None, return_date: str = None,
+                            before: datetime = None) -> dict:
+        before = before or datetime.utcnow()
+        # Without exact dates a route-level aggregate must not become a deal baseline.
+        if not depart_date or not return_date:
+            return summarize_history([], before=before)
+        key = query_key(origin, destination, depart_date, return_date)
+        with Session(engine) as session:
+            rows = session.exec(select(SearchSnapshot).where(
+                SearchSnapshot.query_key == key,
+                SearchSnapshot.searched_at < before,
+            )).all()
+            return summarize_history([(r.searched_at, r.price_twd) for r in rows], before=before)
+
+    @staticmethod
+    def make_snapshot(offer, offer_count: int, *, searched_at: datetime) -> SearchSnapshot:
+        if offer_count < 1 or offer.price_twd <= 0:
+            raise ValueError("A snapshot needs at least one valid offer")
+        return SearchSnapshot(
+            query_key=query_key(offer.origin, offer.destination,
+                                offer.depart_date, offer.return_date),
+            origin=offer.origin, destination=offer.destination,
+            depart_date=offer.depart_date, return_date=offer.return_date,
+            duration_days=offer.duration_days, price_twd=offer.price_twd,
+            offer_count=offer_count, searched_at=searched_at,
+        )
 
     @staticmethod
     def update_route_stats(origin: str, destination: str, duration_days: int) -> RouteStats:
-        """Calculates and updates 7d, 30d, 90d moving averages and historical extremes."""
+        """Informational route summary only. Scoring uses the exact-query method."""
         now = datetime.utcnow()
-        t7 = now - timedelta(days=7)
-        t30 = now - timedelta(days=30)
-        t90 = now - timedelta(days=90)
-
         with Session(engine) as session:
-            # Query stats from records
-            base_stmt = select(FlightSearchRecord).where(
-                FlightSearchRecord.origin == origin,
-                FlightSearchRecord.destination == destination,
-                FlightSearchRecord.duration_days == duration_days
-            )
-            records = session.exec(base_stmt).all()
-
-            if not records:
-                benchmark = PriceAnalyzer.get_benchmark_price(origin, destination)
-                stats = RouteStats(
-                    origin=origin,
-                    destination=destination,
-                    duration_days=duration_days,
-                    sample_count=0,
-                    avg_7d=float(benchmark),
-                    avg_30d=float(benchmark),
-                    avg_90d=float(benchmark),
-                    min_historical=benchmark,
-                    max_historical=benchmark,
-                    last_updated=now
-                )
-                session.add(stats)
-                session.commit()
-                session.refresh(stats)
-                return stats
-
-            # Filter time ranges
-            prices_all = [r.price_twd for r in records if r.price_twd > 0]
-            prices_7d = [r.price_twd for r in records if r.price_twd > 0 and r.searched_at >= t7]
-            prices_30d = [r.price_twd for r in records if r.price_twd > 0 and r.searched_at >= t30]
-            prices_90d = [r.price_twd for r in records if r.price_twd > 0 and r.searched_at >= t90]
-
-            benchmark = PriceAnalyzer.get_benchmark_price(origin, destination)
-
-            avg_7 = sum(prices_7d) / len(prices_7d) if prices_7d else float(benchmark)
-            avg_30 = sum(prices_30d) / len(prices_30d) if prices_30d else float(benchmark)
-            avg_90 = sum(prices_90d) / len(prices_90d) if prices_90d else float(benchmark)
-            min_hist = min(prices_all) if prices_all else benchmark
-            max_hist = max(prices_all) if prices_all else benchmark
-
-            # Find existing stats or create
-            stmt = select(RouteStats).where(
+            rows = session.exec(select(SearchSnapshot).where(
+                SearchSnapshot.origin == origin,
+                SearchSnapshot.destination == destination,
+                SearchSnapshot.duration_days == duration_days,
+            )).all()
+            # Equalize polling frequency per query/day before a route-level summary.
+            from collections import defaultdict
+            from statistics import median
+            grouped = defaultdict(list)
+            for r in rows:
+                grouped[(r.query_key, r.searched_at.date())].append(r.price_twd)
+            observations = [(datetime.combine(day, datetime.min.time()), median(prices))
+                            for (_, day), prices in grouped.items()]
+            ref = summarize_history(observations, before=now)
+            stats = session.exec(select(RouteStats).where(
                 RouteStats.origin == origin,
                 RouteStats.destination == destination,
-                RouteStats.duration_days == duration_days
-            )
-            stats = session.exec(stmt).first()
-            if not stats:
-                stats = RouteStats(
-                    origin=origin,
-                    destination=destination,
-                    duration_days=duration_days
-                )
-
-            stats.sample_count = len(records)
-            stats.avg_7d = round(avg_7, 1)
-            stats.avg_30d = round(avg_30, 1)
-            stats.avg_90d = round(avg_90, 1)
-            stats.min_historical = min_hist
-            stats.max_historical = max_hist
+                RouteStats.duration_days == duration_days,
+            )).first()
+            if stats is None:
+                stats = RouteStats(origin=origin, destination=destination, duration_days=duration_days)
+            stats.sample_count = len(rows)
+            stats.avg_7d = ref["avg_7d"]
+            stats.avg_30d = ref["avg_30d"]
+            stats.avg_90d = ref["avg_90d"]
+            stats.min_historical = min((r.price_twd for r in rows), default=None)
+            stats.max_historical = max((r.price_twd for r in rows), default=None)
             stats.last_updated = now
-
             session.add(stats)
             session.commit()
             session.refresh(stats)
             return stats
-
-    @staticmethod
-    def get_reference_stats(origin: str, destination: str, duration_days: int) -> Dict[str, float]:
-        """Returns baseline / moving avg price references."""
-        with Session(engine) as session:
-            stmt = select(RouteStats).where(
-                RouteStats.origin == origin,
-                RouteStats.destination == destination,
-                RouteStats.duration_days == duration_days
-            )
-            stats = session.exec(stmt).first()
-            benchmark = float(PriceAnalyzer.get_benchmark_price(origin, destination))
-
-            if stats and stats.sample_count > 0:
-                return {
-                    "avg_7d": stats.avg_7d or benchmark,
-                    "avg_30d": stats.avg_30d or benchmark,
-                    "avg_90d": stats.avg_90d or benchmark,
-                    "min_historical": float(stats.min_historical or benchmark),
-                    "is_cold_start": stats.sample_count < 3
-                }
-            else:
-                return {
-                    "avg_7d": benchmark,
-                    "avg_30d": benchmark,
-                    "avg_90d": benchmark,
-                    "min_historical": benchmark,
-                    "is_cold_start": True
-                }

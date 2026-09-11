@@ -1,11 +1,16 @@
-import time
+"""Bounded scans, per-task leases, truthful snapshots and expiring quotes."""
 import json
 import logging
+import time
 from datetime import datetime, timedelta
-from typing import Optional
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 from sqlmodel import Session, select
+from sqlalchemy import delete, update
+from sqlalchemy.dialects.sqlite import insert
 from core.database import engine
 from core.models import SearchTask, FlightSearchRecord, Deal
+from core.snapshots import TaskLease
 from providers.fast_flights_impl import FastFlightsProvider
 from engine.analyzer import PriceAnalyzer
 from engine.deal_scorer import DealScorer
@@ -15,168 +20,172 @@ from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
+
+def taipei_today():
+    return datetime.now(ZoneInfo("Asia/Taipei")).date().isoformat()
+
+
 class RadarScheduler:
-    def __init__(self):
-        self.provider = FastFlightsProvider()
+    def __init__(self, provider=None):
+        self.provider = provider if provider is not None else FastFlightsProvider()
         self.running = False
 
-    def process_task(self, task_id: int) -> bool:
-        """Executes a single search task, updates stats, scores deals, and reschedules."""
-        with Session(engine) as session:
-            task = session.get(SearchTask, task_id)
-            if not task:
-                return False
-
-            origin = task.origin
-            destination = task.destination
-            depart_date = task.depart_date
-            return_date = task.return_date
-            duration_days = task.duration_days
-
-        logger.info(f"Scanning route: {origin} -> {destination} ({depart_date} ~ {return_date})")
-        offers = self.provider.search(origin, destination, depart_date, return_date, max_stops=0)
-
+    @staticmethod
+    def _claim(task_id: int, owner: str) -> bool:
         now = datetime.utcnow()
-        if not offers:
-            logger.warning(f"No direct offers found for {origin}->{destination} on {depart_date}")
-            # Re-schedule with Tier 1 delay
-            with Session(engine) as session:
-                task = session.get(SearchTask, task_id)
-                if task:
-                    task.last_searched_at = now
-                    task.next_run_at = now + timedelta(seconds=settings.TIER_1_INTERVAL_SEC)
-                    session.add(task)
-                    session.commit()
-            return False
-
-        # Best offer is first since provider sorts ascending
-        best_offer = offers[0]
-        logger.info(f"Best offer found: {best_offer.primary_airline} NT${best_offer.price_twd:,}")
-
-        # 1. Save flight records
+        values = dict(task_id=task_id, owner=owner,
+                      expires_at=now + timedelta(seconds=settings.TASK_LEASE_SECONDS))
         with Session(engine) as session:
-            for off in offers:
-                record = FlightSearchRecord(
-                    origin=off.origin,
-                    destination=off.destination,
-                    trip_type=off.trip_type,
-                    depart_date=off.depart_date,
-                    return_date=off.return_date,
-                    duration_days=off.duration_days,
-                    airline=off.primary_airline,
-                    price_twd=off.price_twd,
-                    is_direct=off.is_direct,
-                    stops=off.stops,
-                    depart_time=off.depart_time_str,
-                    arrival_time=off.arrival_time_str,
-                    duration_mins=off.total_duration_mins,
-                    source="google_flights",
-                    searched_at=now
-                )
-                session.add(record)
+            result = session.execute(insert(TaskLease).values(**values).on_conflict_do_update(
+                index_elements=["task_id"], set_=values, where=TaskLease.expires_at <= now))
+            session.commit()
+            return result.rowcount == 1
+
+    @staticmethod
+    def _release(task_id: int, owner: str):
+        with Session(engine) as session:
+            session.execute(delete(TaskLease).where(TaskLease.task_id == task_id, TaskLease.owner == owner))
             session.commit()
 
-        # 2. Update Route Stats
-        PriceAnalyzer.update_route_stats(origin, destination, duration_days)
-        ref_stats = PriceAnalyzer.get_reference_stats(origin, destination, duration_days)
+    @staticmethod
+    def expire_deals():
+        cutoff = datetime.utcnow() - timedelta(hours=settings.DEAL_MAX_AGE_HOURS)
+        with Session(engine) as session:
+            session.execute(update(Deal).where(
+                Deal.status == "active",
+                (Deal.created_at < cutoff) | (Deal.depart_date < taipei_today()),
+            ).values(status="expired"))
+            session.commit()
 
-        # 3. Score the best deal
-        score, deal_level, reasons, drop_pct = DealScorer.evaluate(best_offer, ref_stats)
-
-        # 4. Handle Deal creation and notification
-        if score >= 70 or drop_pct >= 15.0:
-            deal = Deal(
-                origin=origin,
-                destination=destination,
-                depart_date=depart_date,
-                return_date=return_date,
-                duration_days=duration_days,
-                airline=best_offer.primary_airline,
-                price_twd=best_offer.price_twd,
-                ref_price_twd=int(ref_stats["avg_30d"]),
-                drop_pct=drop_pct,
-                deal_score=score,
-                deal_level=deal_level,
-                reasons=json.dumps(reasons, ensure_ascii=False),
-                is_direct=best_offer.is_direct,
-                status="active",
-                created_at=now,
-                notified=False
-            )
-            with Session(engine) as session:
-                session.add(deal)
-                session.commit()
-                session.refresh(deal)
-
-            # Dispatch notification if it qualifies
-            AlertDispatcher.dispatch_deal(deal)
-
-        # 5. Dynamically adjust Tier and Next Run Time
-        if score >= 85 or drop_pct >= 35.0:
-            new_tier = 4
-            delay_sec = settings.TIER_4_INTERVAL_SEC # 30 min
-        elif score >= 75 or drop_pct >= 20.0:
-            new_tier = 3
-            delay_sec = settings.TIER_3_INTERVAL_SEC # 1 hour
-        elif drop_pct >= 10.0:
-            new_tier = 2
-            delay_sec = settings.TIER_2_INTERVAL_SEC # 2 hours
-        else:
-            new_tier = 1
-            delay_sec = settings.TIER_1_INTERVAL_SEC # 6 hours
-
+    @staticmethod
+    def _reschedule(task_id: int, delay: int, *, tier=None, price=None, score=None):
+        now = datetime.utcnow()
         with Session(engine) as session:
             task = session.get(SearchTask, task_id)
             if task:
-                task.tier = new_tier
-                task.last_price = best_offer.price_twd
-                task.last_deal_score = score
                 task.last_searched_at = now
-                task.next_run_at = now + timedelta(seconds=delay_sec)
+                task.next_run_at = now + timedelta(seconds=delay)
+                if tier is not None:
+                    task.tier = tier
+                if price is not None:
+                    task.last_price = price
+                if score is not None:
+                    task.last_deal_score = score
                 session.add(task)
                 session.commit()
 
-        return True
+    def process_task(self, task_id: int) -> bool:
+        owner = str(uuid4())
+        if not self._claim(task_id, owner):
+            return False
+        try:
+            self.expire_deals()
+            with Session(engine) as session:
+                task = session.get(SearchTask, task_id)
+                if not task or task.depart_date < taipei_today():
+                    return False
+                origin, destination = task.origin, task.destination
+                depart, ret, duration = task.depart_date, task.return_date, task.duration_days
+            # Snapshot comparison must precede this batch's insertion.
+            before = datetime.utcnow()
+            offers = self.provider.search(origin, destination, depart, ret, max_stops=0)
+            offers = [off for off in offers if (
+                off.price_twd > 0 and off.is_direct and off.stops == 0
+                and off.origin == origin and off.destination == destination
+                and off.depart_date == depart and off.return_date == ret
+            )]
+            offers.sort(key=lambda off: off.price_twd)
+            if not offers:
+                self._reschedule(task_id, settings.TIER_1_INTERVAL_SEC, tier=1)
+                return False
+            best = offers[0]
+            reference = PriceAnalyzer.get_reference_stats(
+                origin, destination, duration, depart_date=depart, return_date=ret, before=before)
+            score, level, reasons, drop = DealScorer.evaluate(best, reference)
+            observed_at = datetime.utcnow()
+            with Session(engine) as session:
+                for off in offers:
+                    session.add(FlightSearchRecord(
+                        origin=origin, destination=destination, trip_type=off.trip_type,
+                        depart_date=depart, return_date=ret, duration_days=duration,
+                        airline=off.primary_airline, price_twd=off.price_twd,
+                        is_direct=off.is_direct, stops=off.stops,
+                        depart_time=off.depart_time_str, arrival_time=off.arrival_time_str,
+                        duration_mins=off.total_duration_mins, source="google_flights",
+                        searched_at=observed_at,
+                    ))
+                session.add(PriceAnalyzer.make_snapshot(best, len(offers), searched_at=observed_at))
+                # A new quote supersedes older active quotes, not alert history.
+                session.execute(update(Deal).where(
+                    Deal.origin == origin, Deal.destination == destination,
+                    Deal.depart_date == depart, Deal.return_date == ret,
+                    Deal.status == "active",
+                ).values(status="expired"))
+                deal = None
+                if reference["sufficient_history"] and (score >= 70 or drop >= 15):
+                    deal = Deal(
+                        origin=origin, destination=destination, depart_date=depart,
+                        return_date=ret, duration_days=duration, airline=best.primary_airline,
+                        price_twd=best.price_twd, ref_price_twd=round(reference["avg_30d"]),
+                        drop_pct=drop, deal_score=score, deal_level=level,
+                        reasons=json.dumps(reasons, ensure_ascii=False), is_direct=best.is_direct,
+                        status="active", created_at=observed_at, notified=False,
+                    )
+                    session.add(deal)
+                session.commit()
+                if deal is not None:
+                    session.refresh(deal)
+            PriceAnalyzer.update_route_stats(origin, destination, duration)
+            if score >= 85 or drop >= 35:
+                tier, delay = 4, settings.TIER_4_INTERVAL_SEC
+            elif score >= 75 or drop >= 20:
+                tier, delay = 3, settings.TIER_3_INTERVAL_SEC
+            elif drop >= 10:
+                tier, delay = 2, settings.TIER_2_INTERVAL_SEC
+            else:
+                tier, delay = 1, settings.TIER_1_INTERVAL_SEC
+            self._reschedule(task_id, delay, tier=tier, price=best.price_twd, score=score)
+            if deal is not None:
+                AlertDispatcher.dispatch_deal(deal)
+            return True
+        except Exception:
+            # Provider or parse failures must not poison the price history with zero.
+            logger.exception("Search task %s failed; retry delayed", task_id)
+            self._reschedule(task_id, settings.ERROR_RETRY_SECONDS)
+            return False
+        finally:
+            self._release(task_id, owner)
 
-    def run_loop(self, max_iterations: Optional[int] = None):
-        """Main autonomous scanning loop."""
+    def run_loop(self, max_iterations=None):
+        if max_iterations is not None and max_iterations < 1:
+            raise ValueError("max_iterations must be positive")
         self.running = True
-        logger.info("Starting AI Flight Radar Autonomous Loop...")
-        
-        # Ensure task queue is seeded
-        with Session(engine) as session:
-            task_count = session.exec(select(SearchTask)).all()
-            if len(task_count) < 5:
-                ProgressivePlanner.generate_search_tasks()
-
+        seeded_day = None
         iterations = 0
         while self.running:
-            now = datetime.utcnow()
+            today = taipei_today()
+            if seeded_day != today:
+                ProgressivePlanner.generate_search_tasks()
+                self.expire_deals()
+                seeded_day = today
             with Session(engine) as session:
-                # Pick next ready task by priority and due time
-                stmt = select(SearchTask).where(
-                    SearchTask.next_run_at <= now
-                ).order_by(
-                    SearchTask.priority.desc(),
-                    SearchTask.tier.desc(),
-                    SearchTask.next_run_at.asc()
-                )
-                task = session.exec(stmt).first()
-
+                task = session.exec(select(SearchTask).where(
+                    SearchTask.next_run_at <= datetime.utcnow(),
+                    SearchTask.depart_date >= today,
+                    SearchTask.id.not_in(select(TaskLease.task_id).where(
+                        TaskLease.expires_at > datetime.utcnow())),
+                ).order_by(SearchTask.next_run_at.asc(), SearchTask.tier.desc(),
+                           SearchTask.priority.desc()).limit(1)).first()
             if not task:
-                logger.info("No due tasks right now. Sleeping 15s...")
+                if max_iterations is not None:
+                    break
                 time.sleep(15)
                 continue
-
-            try:
-                self.process_task(task.id)
-            except Exception as e:
-                logger.error(f"Error processing task #{task.id}: {e}", exc_info=True)
-
+            self.process_task(task.id)
             iterations += 1
-            if max_iterations and iterations >= max_iterations:
-                logger.info(f"Reached max iterations ({max_iterations}). Exiting loop.")
+            if max_iterations is not None and iterations >= max_iterations:
                 break
+        self.running = False
 
     def stop(self):
         self.running = False

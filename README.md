@@ -1,86 +1,86 @@
-# AI Flight Radar (AI 自動低價機票搜尋、追蹤與旅遊情報雷達)
+# AI Flight Radar
 
-> **先找哪裡、哪一天出現異常便宜機票，再決定是否旅行。**
-> 具備全天候自動排程、智慧分層掃描 (Progressive Tiered Queue)、Deal Score 評分模型與即時推播通知。
+台灣出發的機票報價搜尋、歷史觀測與低價提醒原型。核心原則是：**先確定比較方式正確，再宣稱發現便宜票。**
 
----
+目前使用 `fast-flights 3.1.0` 取得 Google Flights 搜尋結果、SQLite/SQLModel 保存資料、FastAPI 提供既有網頁介面，以及 ntfy/Telegram 發送選擇性通知。只有一個實際機票資料來源；NLP 與摘要目前是規則式程式，不是已接上大型語言模型的自主 Agent。
 
-## 一、系統核心能力
+## 安裝與啟動
 
-1. **Google Flights 即時航線爬取 (`fast-flights`)**
-   - 支援台灣主要機場 (`TPE`, `TSA`, `KHH`, `RMQ`) 至日本 12 大熱門目的地 (`NRT`, `HND`, `KIX`, `FUK`, `OKA`, `CTS`, `NGO`, `KMJ`, `KOJ`, `SDJ`, `OKJ`, `TAK`)。
-   - 內建 RateLimiter 限流、隨機 Jitter (3~6s) 與指數退避 (Exponential Backoff)，兼顧效率與防封鎖。
+建議 Python 3.12。以下指令在儲存庫根目錄執行：
 
-2. **漸進式排程規劃器 (Progressive Search Planner)**
-   - 避開暴力枚舉的排列組合爆炸，採用智慧採樣窗口 (未來 14~90 天，以 4~5 天行程為基準)。
-   - 動態四階梯佇列 (Tiered Queue)：
-     - **Tier 1 (標準監控)**：每 6 小時。
-     - **Tier 2 (價格波動)**：降幅 > 10%，每 2 小時。
-     - **Tier 3 (逼近神價)**：Deal Score ≥ 75 或降幅 > 20%，每 1 小時。
-     - **Tier 4 (極致破盤)**：Deal Score ≥ 85 或降幅 > 35%，每 30 分鐘緊密追蹤座位餘量。
-
-3. **Deal Score 智慧多維度評分 (0 ~ 100 分)**
-   - **絕對價格競爭力 (0~25 分)**：超甜價位加分。
-   - **相對 30 日均價降幅 (0~25 分)**：大降幅破盤加分。
-   - **相對 90 日均價降幅 (0~15 分)**。
-   - **歷史新低紀錄 (0~10 分)**。
-   - **直飛航班 (10 分)**。
-   - **日間航班時間友善度 (5 分)**：扣除紅眼/清晨 00:00~06:00 起飛班機。
-   - **市區型便利機場 (5 分)**：羽田/松山/福岡加分。
-   - **航空公司服務等級 (5 分)**：含全服務或標註廉航。
-
-4. **主動警報與通知去重 (Alert Engine & Throttling)**
-   - 整合 **ntfy** (免設定、一鍵訂閱推播至手機/瀏覽器)。
-   - 整合 **Telegram Bot**。
-   - 內建 12 小時冷卻狀態機與價格二次降幅閥值，避免同班神票重複洗版。
-
-5. **AI 意圖探測與情報簡報 (NLP Intent & Deal Intelligence)**
-   - 自然語言需求解析（例如：「幫我找未來半年台灣出發去日本，直飛，旅行 4～5 天，來回最好低於 8,000 元」）。
-   - 每日情報報告：「今天去哪裡最值得買？」。
-
-6. **即時視覺化儀表板 (Web Dashboard & REST API)**
-   - FastAPI 後端 + Tailwind CSS 暗色系響應式儀表板。
-   - 支援即時手動觸發單一航線掃描、查看歷史價格統計與點擊一鍵導向 Google Flights。
-
----
-
-## 二、快速啟動指南
-
-### 1. 目錄位置
 ```bash
-cd /mnt/c/Users/Administrator/ai-flight-radar
+python -m venv .venv
+# Linux / macOS / WSL
+source .venv/bin/activate
+# Windows PowerShell 改用：.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+cp .env.example .env
+# Windows PowerShell：Copy-Item .env.example .env
+python main.py init
+python main.py status
+python main.py scan --count 3
+python main.py server
 ```
 
-### 2. 核心指令
+瀏覽 `http://127.0.0.1:8787`。需要持續追蹤時，在另一個終端機執行 `python main.py loop`；啟動網頁伺服器**不等於**已啟動持續掃描。WSL/Linux 也能使用 `./run-radar.sh init|status|scan|loop|server`。
 
-| 指令 | 說明 |
-| :--- | :--- |
-| `./run-radar.sh status` | 顯示當前系統狀態總覽與今日高評分 Deals 榜單 |
-| `./run-radar.sh scan --count 3` | 執行單次批次掃描（指定筆數） |
-| `./run-radar.sh loop` | 啟動全天候自動雷達巡邏迴圈 (Progressive Loop) |
-| `./run-radar.sh server` | 啟動 FastAPI Web 儀表板 (`http://localhost:8787`) |
-| `./run-radar.sh nlp "查詢詞"` | 在 CLI 測試 AI 自然語言需求解析 |
+`scan --count 3` 最多處理三個可執行任務；沒有到期任務就結束，不會為湊足次數無限等待。外部搜尋仍需要可用網路，並可能因來源改版、限流或查無航班失敗。
 
----
+## 這次的價格可信度修正
 
-## 三、Web 儀表板與推播設定
+每次成功搜尋保留所有原始 offer，但只新增**一筆最低價快照**作為統計輸入。相同航線、出發日、回程日、幣別、旅客數、艙等、直飛條件與來源才會共用比較基準。先在每天內取快照中位數，再以觀測日等權平均，避免高頻追蹤某一天改變其統計權重。
 
-* **本機儀表板**：瀏覽器開啟 `http://localhost:8787`
-* **手機即時推播訂閱 (ntfy)**：
-  - 手機下載 [ntfy App](https://ntfy.sh)（iOS / Android）或使用瀏覽器打開：
-  - 訂閱 Topic：`flight-radar-taiwan`
-  - 一旦雷達發現 Deal Score ≥ 80 的機票，將立刻收到推播，點擊通知直接開啟 Google Flights 預訂頁！
-* **Telegram Bot 推播 (可選)**：
-  - 在 `config/settings.py` 或系統環境變數中設定 `TELEGRAM_BOT_TOKEN` 與 `TELEGRAM_CHAT_ID` 即可自動啟用。
+本批價格不加入自己的比較基準。近 30 日內不足五個不同觀測日，不產生歷史降幅優惠；空白歷史不再填入人工預設的「市場均價」。`90D_LOW` 另要求長期間及足夠觀測日，不能靠幾筆資料宣稱 90 日新低。30/90 日重疊窗口不再重複加分。
 
----
+行李、附加費與完整往返航段未經確認，不能由航空公司名稱推定含托運。未知時間不加分。分數仍以 100 為名目上限，但未驗證的行李部分保留 5 分、不送分，因此目前最高 95 分。
 
-## 四、資料庫與架構設計
+完整定義及限制見 [價格判斷方法](docs/PRICE_INTELLIGENCE.md)。
 
-* **SQLite 資料庫**：位於 `data/flights.db`
-* **核心資料表**：
-  - `routes`：監控航線基礎清單。
-  - `flight_records`：每一次爬取的詳細航班價格、時間、航空公司記錄。
-  - `route_stats`：動態計算之 7 日、30 日、90 日均價與歷史最低價。
-  - `deals`：偵測符合高評分之神價事件與推薦理由。
-  - `search_tasks`：具備優先級與 Tier 1~4 的智慧排程巡邏佇列。
+## 舊版升級
+
+先停止舊 worker，備份 `data/flights.db`（自訂 `DB_PATH` 則備份該檔案），更新程式與依賴，再執行 `python main.py init`。
+
+升級只新增 `search_snapshots`、`task_leases`、`radar_migrations` 三張表，不刪除原始查價或成功通知歷史。首次升級會把舊算法的 active deals 標為 expired、清空舊統計摘要，要求新方法重新產生證據；不會重複清空後續產生的新優惠。**舊 offer 不會冒充新方法收集到的快照，需重新累積觀測日。**
+
+## 通知與安全
+
+ntfy 預設關閉。請在 `.env` 設定自己的 topic，再明確設定 `NTFY_ENABLED=true`；不要共用舊示範 topic。難猜的 topic 名稱不等於存取控制，私人通知應使用受保護／保留的 topic 或自行架設有權限設定的服務。
+
+Telegram 需設定 `TELEGRAM_ENABLED=true`、`TELEGRAM_BOT_TOKEN` 與 `TELEGRAM_CHAT_ID`。`.env`、資料庫及金鑰檔不應推送到 GitHub。
+
+兩個通知渠道都失敗時，不會標記為已通知；至少一個成功才啟動既有冷卻規則。部分渠道失敗的獨立重試仍列在後續工作。
+
+API 預設只監聽本機。設定 `API_KEY` 後，手動觸發掃描 API 需要 `X-API-Key` header。既有網頁尚無 API key 輸入介面；設定金鑰後，應以授權 API 客戶端觸發，或由可信反向代理處理。對外服務前還需 HTTPS、認證、全域限流及前端安全檢查，不能把這個本機原型直接視為公開 SaaS。
+
+## 排程與有效期
+
+四層追蹤間隔維持 6 小時／2 小時／1 小時／30 分鐘；加入每任務 15 分鐘租約，防止同一任務被兩個程序同時處理。失敗至少延遲 10 分鐘再嘗試。租約不是無限長鎖；超長請求及多 worker 全域流量預算仍需後續補強，目前建議一個持續掃描 worker。
+
+報價最長顯示 6 小時，超時或出發日期已過不再列為有效優惠。這是資料新鮮度規則，不是保證六小時內仍可購買。預設是抽樣掃描，不是窮舉日本所有航線與日期。
+
+## 測試
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q
+python -m compileall -q ai api config core engine notifier providers main.py
+```
+
+測試使用獨立臨時 SQLite、假的報價與假的通知回傳，不會發送真實通知、下單或用真實票價作固定斷言。CI 檢查依賴、語法、統計、資料庫、通知狀態、API 與 `fast-flights` v3 呼叫介面；不代表 Google Flights 線上抓取永遠可用。
+
+## Docker（選用）
+
+```bash
+docker build -t ai-flight-radar .
+docker run --rm -p 127.0.0.1:8787:8787 -v radar-data:/app/data ai-flight-radar
+```
+
+此命令只啟動本機可存取的網頁服務，不自動啟用通知或掃描。映像提供建置定義；請在部署環境自行確認 Docker 建置及網路條件。
+
+## 文件
+
+- [已知開源專案與工具：用途、採用狀態、限制](docs/OPEN_SOURCE_STACK.md)
+- [價格快照、統計與升級設計](docs/PRICE_INTELLIGENCE.md)
+- [後續路線圖與驗收標準](docs/ROADMAP.md)
+
+原儲存庫尚未提供專案 LICENSE；此次不代替作者決定授權。公開可讀不代表可以忽略授權，引用相依專案仍需遵守各自條款。

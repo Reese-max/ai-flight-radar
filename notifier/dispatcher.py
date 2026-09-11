@@ -1,91 +1,67 @@
+"""Only successful deliveries advance the cooldown state."""
+import html
 import json
 import logging
 from datetime import datetime
+from urllib.parse import urlencode
 from sqlmodel import Session
 from core.database import engine
 from core.models import Deal
 from notifier.ntfy_client import ntfy_client
 from notifier.telegram_client import telegram_client
 from notifier.throttler import AlertThrottler
-from config.routes import TAIWAN_AIRPORTS, JAPAN_AIRPORTS
 
 logger = logging.getLogger(__name__)
+
 
 class AlertDispatcher:
     @staticmethod
     def get_google_flights_url(origin: str, destination: str, depart_date: str, return_date: str) -> str:
-        return f"https://www.google.com/travel/flights?q=flights%20from%20{origin}%20to%20{destination}%20on%20{depart_date}%20through%20{return_date}"
+        query = f"flights from {origin} to {destination} on {depart_date} through {return_date}"
+        return "https://www.google.com/travel/flights?" + urlencode({"q": query, "curr": "TWD"})
 
     @classmethod
     def dispatch_deal(cls, deal: Deal) -> bool:
-        should_send = AlertThrottler.should_alert(
-            origin=deal.origin,
-            destination=deal.destination,
-            depart_date=deal.depart_date,
-            return_date=deal.return_date,
-            current_price=deal.price_twd,
-            deal_score=deal.deal_score
-        )
-
-        if not should_send:
-            logger.info(f"Alert throttled or below threshold for {deal.origin}->{deal.destination} (Score: {deal.deal_score})")
+        if not AlertThrottler.should_alert(
+            origin=deal.origin, destination=deal.destination,
+            depart_date=deal.depart_date, return_date=deal.return_date,
+            current_price=deal.price_twd, deal_score=deal.deal_score,
+        ):
             return False
-
-        orig_name = TAIWAN_AIRPORTS.get(deal.origin, None)
-        orig_label = f"{orig_name.city}({deal.origin})" if orig_name else deal.origin
-        dest_name = JAPAN_AIRPORTS.get(deal.destination, None)
-        dest_label = f"{dest_name.city}({deal.destination})" if dest_name else deal.destination
-
-        gf_url = cls.get_google_flights_url(deal.origin, deal.destination, deal.depart_date, deal.return_date)
-        
+        url = cls.get_google_flights_url(deal.origin, deal.destination, deal.depart_date, deal.return_date)
         try:
-            reasons_list = json.loads(deal.reasons)
-        except Exception:
-            reasons_list = []
-        reasons_text = "\n".join([f"  • {r}" for r in reasons_list])
-
-        level_badge = "🔥【神價機票情報】" if deal.deal_level == "EXCEPTIONAL_DEAL" else "🎯【超值機票發現】"
-
-        # 1. Dispatch via ntfy
-        ntfy_title = f"{level_badge} {orig_label} ✈️ {dest_label} NT${deal.price_twd:,} (Score: {deal.deal_score})"
-        ntfy_msg = (
-            f"航線：{orig_label} 往返 {dest_label}\n"
-            f"日期：{deal.depart_date} ~ {deal.return_date} ({deal.duration_days} 天)\n"
-            f"航空：{deal.airline} (直飛)\n"
-            f"票價：NT${deal.price_twd:,} (比基準降幅 {deal.drop_pct}%)\n"
-            f"評分：{deal.deal_score} / 100\n\n"
-            f"推薦原因：\n{reasons_text}\n\n"
-            f"點擊立即前往 Google Flights 查看！"
+            reasons = json.loads(deal.reasons)
+            if not isinstance(reasons, list):
+                reasons = []
+        except (TypeError, ValueError):
+            reasons = []
+        title = f"機票報價提醒 {deal.origin} → {deal.destination} NT${deal.price_twd:,}"
+        message = (
+            f"{deal.depart_date} 至 {deal.return_date}\n航空：{deal.airline}\n"
+            f"報價：NT${deal.price_twd:,}；評分 {deal.deal_score}/100\n"
+            + "\n".join(str(reason) for reason in reasons)
+            + "\n此為搜尋時報價，非保證庫存；購買前確認往返航段、行李與總價。"
         )
-        ntfy_priority = 5 if deal.deal_level == "EXCEPTIONAL_DEAL" else 4
-        sent_ntfy = ntfy_client.send_alert(
-            title=ntfy_title,
-            message=ntfy_msg,
-            priority=ntfy_priority,
-            click_url=gf_url
-        )
-
-        # 2. Dispatch via Telegram
-        tg_html = (
-            f"<b>{level_badge}</b>\n"
-            f"✈️ <b>{orig_label} ➔ {dest_label}</b>\n"
-            f"💰 <b>價格：NT${deal.price_twd:,}</b> (降幅 <b>{deal.drop_pct}%</b>)\n"
-            f"🎯 <b>Deal Score：{deal.deal_score} / 100</b>\n"
-            f"📅 日期：<code>{deal.depart_date}</code> 至 <code>{deal.return_date}</code> ({deal.duration_days} 天)\n"
-            f"🏢 航空公司：{deal.airline}\n"
-            f"\n<b>推薦理由：</b>\n{reasons_text}\n\n"
-            f"👉 <a href='{gf_url}'>點此開啟 Google Flights 預訂/比價</a>"
-        )
-        sent_tg = telegram_client.send_message(tg_html)
-
-        # Update deal notified status in DB
+        results = []
+        for name, send in (
+            ("ntfy", lambda: ntfy_client.send_alert(title=title, message=message, priority=4, click_url=url)),
+            ("telegram", lambda: telegram_client.send_message(
+                f"<b>{html.escape(title)}</b>\n{html.escape(message)}\n"
+                f'<a href="{html.escape(url, quote=True)}">查看 Google Flights</a>')),
+        ):
+            try:
+                results.append(bool(send()))
+            except Exception:
+                logger.exception("Notification channel %s failed", name)
+                results.append(False)
+        if not any(results):
+            logger.warning("No channel delivered deal %s; leaving it eligible for retry", deal.id)
+            return False
         with Session(engine) as session:
-            db_deal = session.get(Deal, deal.id)
-            if db_deal:
-                db_deal.notified = True
-                db_deal.notified_at = datetime.utcnow()
-                session.add(db_deal)
+            stored = session.get(Deal, deal.id)
+            if stored is not None:
+                stored.notified = True
+                stored.notified_at = datetime.utcnow()
+                session.add(stored)
                 session.commit()
-
-        logger.info(f"Alert successfully dispatched for Deal #{deal.id}: {deal.origin}->{deal.destination}")
         return True
