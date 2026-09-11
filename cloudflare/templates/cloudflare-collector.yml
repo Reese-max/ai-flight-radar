@@ -1,0 +1,43 @@
+# Dormant template; NOT under .github/workflows in the supplied patch.
+# First validate the real provider manually. Copy only after owner approval.
+name: Cloudflare flight collector (bounded)
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: 'Run up to three live search tasks (requires both enable flags)'
+        type: boolean
+        default: false
+  # To enable hourly runs AFTER validation, uncomment:
+  # schedule:
+  #   - cron: '17 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: ai-flight-radar-cloudflare-collector
+  cancel-in-progress: false
+jobs:
+  collect:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.CF_RADAR_COLLECTOR_ENABLED == 'true' &&
+      (github.event_name == 'schedule' || inputs.execute == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install existing provider dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run a bounded batch
+        env:
+          RADAR_URL: ${{ vars.CF_RADAR_URL }}
+          RADAR_COLLECTOR_KEY: ${{ secrets.CF_RADAR_COLLECTOR_KEY }}
+          RADAR_COLLECTOR_ENABLED: 'true'
+          NTFY_ENABLED: 'false'
+          TELEGRAM_ENABLED: 'false'
+        run: python cloudflare/scripts/collector.py --execute --max-tasks 3

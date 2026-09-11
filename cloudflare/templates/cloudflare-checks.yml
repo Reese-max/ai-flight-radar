@@ -1,0 +1,58 @@
+# Dormant template. The active, extended checks are in .github/workflows/cloudflare-checks.yml.
+name: Cloudflare preparation checks
+on:
+  workflow_dispatch:
+  pull_request:
+    paths: ['cloudflare/**', 'web/**', 'config/routes.py']
+permissions:
+  contents: read
+concurrency:
+  group: cf-radar-template-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Worker logic, actual SQLite SQL, API and build-adapter fixture tests
+        working-directory: cloudflare
+        run: node --test tests/*.test.mjs
+      - name: Offline collector tests (no provider calls)
+        run: python -m unittest discover -s cloudflare/tests -p 'test_*.py' -v
+      - name: Build from the repository's actual UI
+        working-directory: cloudflare
+        run: node build.mjs
+      - name: Collector default must remain dry-run
+        run: python cloudflare/scripts/collector.py
+  wrangler-validation:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Install the reviewed Wrangler release
+        working-directory: cloudflare
+        run: npm install
+      - name: Bundle and validate local D1 schema (NOT remote)
+        working-directory: cloudflare
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+          CI: 'true'
+        run: |
+          npm run build
+          npx --no-install wrangler d1 migrations apply DB --local
+          npm run wrangler-check

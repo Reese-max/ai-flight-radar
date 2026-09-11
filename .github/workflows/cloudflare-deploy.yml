@@ -1,0 +1,91 @@
+name: Deploy Cloudflare Workers
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_target:
+        description: 'Type ai-flight-radar-cf to publish this Worker and apply its D1 migration'
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: ai-flight-radar-cloudflare-release
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main' && inputs.confirm_target == 'ai-flight-radar-cf'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Require deployment settings without exposing values
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_RADAR_DATABASE_ID: ${{ vars.CF_RADAR_DATABASE_ID || secrets.CF_RADAR_DATABASE_ID }}
+          CF_RADAR_ADMIN_KEY: ${{ secrets.CF_RADAR_ADMIN_KEY }}
+          CF_RADAR_COLLECTOR_KEY: ${{ secrets.CF_RADAR_COLLECTOR_KEY }}
+        run: node cloudflare/scripts/deployment-preflight.mjs --require-ready
+      - name: Install and test without deployment secrets
+        working-directory: cloudflare
+        run: |
+          npm install
+          npm test
+          npm run build
+          npm run wrangler-check
+          npx --no-install wrangler d1 migrations apply DB --local
+      - name: Generate config for the explicit existing D1 target
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_RADAR_DATABASE_ID: ${{ vars.CF_RADAR_DATABASE_ID || secrets.CF_RADAR_DATABASE_ID }}
+        run: node cloudflare/scripts/prepare-config.mjs
+      - name: Check selected database name before any remote change
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_RADAR_DATABASE_ID: ${{ vars.CF_RADAR_DATABASE_ID || secrets.CF_RADAR_DATABASE_ID }}
+        run: |
+          node --input-type=module <<'JS'
+          const e=process.env;
+          const url=`https://api.cloudflare.com/client/v4/accounts/${e.CLOUDFLARE_ACCOUNT_ID}/d1/database/${e.CF_RADAR_DATABASE_ID}`;
+          const r=await fetch(url,{headers:{Authorization:`Bearer ${e.CLOUDFLARE_API_TOKEN}`},redirect:'error',signal:AbortSignal.timeout(20000)});
+          if(!r.ok)throw new Error(`D1 authorization check HTTP ${r.status}`);
+          const j=await r.json();
+          if(!j.success||j.result?.name!=='ai-flight-radar-cf')throw new Error('Refusing unrelated D1 database');
+          console.log('Confirmed the dedicated ai-flight-radar-cf D1 target.');
+          JS
+      - name: Apply additive production migration and publish only the named Worker
+        working-directory: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+        shell: bash
+        run: |
+          set -o pipefail
+          npx --no-install wrangler d1 migrations apply DB --remote --config wrangler.deploy.json
+          npx --no-install wrangler deploy --config wrangler.deploy.json | tee "$RUNNER_TEMP/radar-deploy.log"
+      - name: Configure separate application secrets on that Worker
+        working-directory: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_RADAR_ADMIN_KEY: ${{ secrets.CF_RADAR_ADMIN_KEY }}
+          CF_RADAR_COLLECTOR_KEY: ${{ secrets.CF_RADAR_COLLECTOR_KEY }}
+        shell: bash
+        run: |
+          set -o pipefail
+          node -e 'process.stdout.write(JSON.stringify({ADMIN_KEY:process.env.CF_RADAR_ADMIN_KEY,COLLECTOR_KEY:process.env.CF_RADAR_COLLECTOR_KEY}))' | npx --no-install wrangler secret bulk --config wrangler.deploy.json
+      - name: Verify the returned HTTPS URL, API and write protection
+        shell: bash
+        run: |
+          url=$(grep -Eo 'https://ai-flight-radar-cf\.[a-z0-9-]+\.workers\.dev' "$RUNNER_TEMP/radar-deploy.log" | sort -u)
+          test -n "$url"
+          CF_RADAR_URL="$url" node cloudflare/scripts/verify-deployment.mjs

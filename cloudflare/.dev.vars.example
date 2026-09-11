@@ -1,0 +1,6 @@
+# Local-only example. Copy to .dev.vars for Wrangler; do not commit secrets.
+# Two DIFFERENT random values, each 32-256 ASCII characters. No defaults are used.
+ADMIN_KEY=
+COLLECTOR_KEY=
+# Do not enable until the source and usage budget have been reviewed.
+COLLECTOR_ENABLED=false

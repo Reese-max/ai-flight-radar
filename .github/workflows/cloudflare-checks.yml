@@ -1,0 +1,101 @@
+name: Cloudflare Workers checks
+on:
+  push:
+    branches: [main, 'feat/cloudflare-*']
+    paths: ['cloudflare/**', 'web/**', '.github/workflows/cloudflare-*.yml']
+  pull_request:
+    paths: ['cloudflare/**', 'web/**', '.github/workflows/cloudflare-*.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: cf-radar-checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+      CI: 'true'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Offline Worker and collector tests
+        run: |
+          node --test cloudflare/tests/*.test.mjs
+          python -m unittest discover -s cloudflare/tests -p 'test_*.py' -v
+          python cloudflare/scripts/collector.py
+      - name: Install pinned Wrangler without any deployment credentials
+        working-directory: cloudflare
+        run: npm install
+      - name: Build actual Figma UI and validate Worker bundle
+        working-directory: cloudflare
+        run: |
+          npm run build
+          npm run wrangler-check
+      - name: Apply local D1 migrations only
+        working-directory: cloudflare
+        run: npx --no-install wrangler d1 migrations apply DB --local
+      - name: Real workerd and local D1 smoke test (no cloud account)
+        working-directory: cloudflare
+        shell: bash
+        run: |
+          npx --no-install wrangler dev --ip 127.0.0.1 --port 8799 > "$RUNNER_TEMP/radar-workerd.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 45); do
+            if curl --silent --fail http://127.0.0.1:8799/api/health > "$RUNNER_TEMP/radar-health.json"; then break; fi
+            sleep 2
+          done
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const base='http://127.0.0.1:8799';
+          const health=await fetch(base+'/api/health'); assert.equal(health.status,200);
+          assert.equal((await health.json()).app_id,'reese-max/ai-flight-radar:cloudflare-v1');
+          const home=await fetch(base+'/'); assert.equal(home.status,200); assert((await home.text()).includes('Flight Radar'));
+          assert.equal((await fetch(base+'/assets/app.js')).status,200);
+          const cfg=await(await fetch(base+'/api/ui/config')).json(); assert.equal(cfg.worker.collector_enabled,false);
+          const data=await(await fetch(base+'/api/ui/quotes')).json(); assert.deepEqual(data.quotes,[]); assert.equal(data.demo,false);
+          const denied=await fetch(base+'/api/scan/trigger',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});
+          assert.equal(denied.status,503);
+          console.log('PASS: actual workerd, local D1, actual UI assets, empty quotes, disabled collector, fail-closed writes.');
+          JS
+      - name: Upload build output (not deployed, no database or credentials)
+        uses: actions/upload-artifact@v7
+        with:
+          name: cloudflare-workers-build
+          path: |
+            cloudflare/public/
+            cloudflare/dist/
+            cloudflare/package-lock.json
+          retention-days: 7
+      - name: Show local runtime log on failure
+        if: failure()
+        run: test ! -f "$RUNNER_TEMP/radar-workerd.log" || tail -n 80 "$RUNNER_TEMP/radar-workerd.log"
+  prerequisites:
+    if: github.event_name == 'push' && github.repository == 'Reese-max/ai-flight-radar'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+      - name: Check setting presence only; never print values or contact Cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CF_RADAR_DATABASE_ID: ${{ vars.CF_RADAR_DATABASE_ID || secrets.CF_RADAR_DATABASE_ID }}
+          CF_RADAR_ADMIN_KEY: ${{ secrets.CF_RADAR_ADMIN_KEY }}
+          CF_RADAR_COLLECTOR_KEY: ${{ secrets.CF_RADAR_COLLECTOR_KEY }}
+        run: node cloudflare/scripts/deployment-preflight.mjs

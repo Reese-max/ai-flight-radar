@@ -1,0 +1,28 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {DAY,taipeiToday,dateOnly,timestamp,taskSpec,summarize,parseIntent} from '../src/logic.mjs';
+const now=Date.parse('2026-09-11T06:00:00Z');
+const task={origin:'TPE',destination:'FUK',depart_date:'2026-11-12',return_date:'2026-11-16'};
+
+test('Taipei date is independent of host timezone',()=>assert.equal(taipeiToday(Date.parse('2026-09-10T18:00:00Z')),'2026-09-11'));
+test('leap day validated',()=>{assert.equal(dateOnly('2028-02-29'),'2028-02-29');assert.throws(()=>dateOnly('2026-02-29'));});
+test('timestamp without timezone rejected',()=>assert.throws(()=>timestamp('2026-09-11T06:00:00')));
+test('timezone offset normalized to UTC',()=>assert.equal(timestamp('2026-09-11T14:00:00+08:00'),'2026-09-11T06:00:00.000Z'));
+test('invalid hour not silently normalized',()=>assert.throws(()=>timestamp('2026-09-11T24:00:00Z')));
+test('query key stable for airport casing and property order',async()=>assert.equal((await taskSpec(task,now)).query_key,(await taskSpec({return_date:task.return_date,depart_date:task.depart_date,origin:'tpe',destination:'fuk'},now)).query_key));
+test('query key differs by departure date',async()=>assert.notEqual((await taskSpec(task,now)).query_key,(await taskSpec({...task,depart_date:'2026-11-13'},now)).query_key));
+test('trip_days includes departure day',async()=>assert.equal((await taskSpec(task,now)).trip_days,5));
+test('unknown task fields rejected',async()=>assert.rejects(()=>taskSpec({...task,price:1},now)));
+test('past travel date rejected',async()=>assert.rejects(()=>taskSpec({...task,depart_date:'2026-08-01'},now)));
+test('same-day return rejected',async()=>assert.rejects(()=>taskSpec({...task,return_date:task.depart_date},now)));
+test('beyond 366 days rejected',async()=>assert.rejects(()=>taskSpec({...task,depart_date:'2027-11-12',return_date:'2027-11-16'},now)));
+test('empty history has no made-up baseline',()=>assert.equal(summarize([],new Date(now).toISOString()).baseline_twd,null));
+test('four days cannot produce a historical discount',()=>{const rows=[1,2,3,4].map(d=>({searched_at:new Date(now-d*DAY).toISOString(),price_twd:8000}));assert.equal(summarize(rows,new Date(now).toISOString()).baseline_confident,false);});
+test('daily medians give equal day weights',()=>{const rows=[1,2,3,4,5].map(d=>({searched_at:new Date(now-d*DAY).toISOString(),price_twd:8000}));for(let i=0;i<99;i++)rows.push({searched_at:new Date(now-DAY-i*1000).toISOString(),price_twd:10000});const v=summarize(rows,new Date(now).toISOString());assert.equal(v.baseline_twd,8400);});
+test('current/future and older than 30 days excluded',()=>{const rows=[0,-1,31].map(d=>({searched_at:new Date(now-d*DAY).toISOString(),price_twd:90000}));assert.equal(summarize(rows,new Date(now).toISOString()).prior_observed_days,0);});
+test('NLP always requests confirmation and discloses rule-based mode',()=>{const v=parseIntent('日本直飛 4～5 天 8000元',now);assert.equal(v.requires_confirmation,true);assert.equal(v.method,'rule_based');assert.equal(v.intent.max_budget_twd,8000);});
+test('NLP Japanese region exclusion supported',()=>{const v=parseIntent('日本，不要北海道',now);assert(!v.intent.destinations.includes('CTS'));assert(v.intent.destinations.includes('FUK'));});
+test('NLP specific destination is not replaced by whole country',()=>{const v=parseIntent('去日本福岡 4天',now);assert.deepEqual(v.intent.destinations,['FUK']);});
+test('NLP ambiguous seasonal dates are disclosed',()=>assert(parseIntent('寒假去日本',now).warnings.some(w=>w.includes('月份'))));
+test('NLP does not interpret a year as the budget',()=>assert.equal(parseIntent('2026-11-12至2026-11-16日本',now).intent.max_budget_twd,null));
+test('NLP invalid duration refused rather than silently inverted',()=>assert.throws(()=>parseIntent('日本7～3天',now)));

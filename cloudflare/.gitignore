@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+.local/
+public/
+dist/
+wrangler.deploy.json
+.dev.vars
+.env
+__pycache__/
+*.pyc
