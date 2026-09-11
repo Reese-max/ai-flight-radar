@@ -140,8 +140,10 @@ try:
             page.locator('#historyRows .date-row').click()
             expect(page.locator('#detailContent .price.hero')).to_be_visible()
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+            expect(page.locator('.bottom-nav')).not_to_be_visible()
+            page.locator('#detailPage a[href="#explore"]').click()
+            expect(page.locator('#results .flight-card')).to_have_count(3)
         # An API failure is not a fake zero-price result, and last data stays labeled.
-        page.locator('#detailPage a[href="#explore"]').click()
         expect(page.locator('#results .flight-card')).to_have_count(3)
         offline=True
         page.locator('button[data-action=refresh]:visible').first.click()
