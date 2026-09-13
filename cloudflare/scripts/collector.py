@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import site
 import subprocess
 import sys
 import time
@@ -54,7 +55,8 @@ class Client:
             allowed = {'/api/health','/api/admin/tasks'}
         if path not in allowed:
             raise SafeFailure('Unexpected API path')
-        headers = {'Accept':'application/json'}
+        headers = {'Accept':'application/json',
+            'User-Agent':'ai-flight-radar-collector/2.0 (+https://github.com/Reese-max/ai-flight-radar)'}
         if path != '/api/health':
             headers['X-API-Key' if self.role == 'admin' else 'Authorization'] = (
                 self.key if self.role == 'admin' else f'Bearer {self.key}')
@@ -101,8 +103,15 @@ def validate_task(task: dict) -> dict:
 
 def search_subprocess(task: dict) -> dict:
     # Avoid exposing runner/application credentials to the upstream search process.
-    keep = {'PATH','HOME','USERPROFILE','SystemRoot','WINDIR','TEMP','TMP','TMPDIR','SSL_CERT_FILE','SSL_CERT_DIR'}
-    child_env = {k:v for k,v in os.environ.items() if k in keep}
+    keep = {'PATH','HOME','USERPROFILE','SYSTEMROOT','WINDIR','TEMP','TMP','TMPDIR','SSL_CERT_FILE','SSL_CERT_DIR'}
+    child_env = {k:v for k,v in os.environ.items() if k.upper() in keep}
+    # Winsock (_overlapped/asyncio) fails with WSAEPROVIDERFAILEDINIT unless the
+    # env block carries the canonical uppercase SYSTEMROOT.
+    child_env['SYSTEMROOT'] = os.environ.get('SYSTEMROOT') or r'C:\Windows'
+    # Store Python installs user packages under LocalCache, which site.py cannot
+    # locate under a stripped env; hand the child the resolved site dirs instead.
+    extra = [p for p in (*site.getsitepackages(), site.getusersitepackages()) if p and os.path.isdir(p)]
+    child_env['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(extra))
     child_env.update(NTFY_ENABLED='false',TELEGRAM_ENABLED='false',PYTHON_DOTENV_DISABLED='1')
     try:
         result = subprocess.run([sys.executable,str(Path(__file__).with_name('search_once.py'))],
