@@ -14,14 +14,14 @@
   },
   "vars": {
     "APP_ID": "reese-max/ai-flight-radar:cloudflare-v1",
-    "COLLECTOR_ENABLED": "true",
+    "COLLECTOR_ENABLED": "false",
     "MAX_SEARCHES_PER_HOUR": "3"
   },
   "d1_databases": [
     {
       "binding": "DB",
       "database_name": "ai-flight-radar-cf",
-      "database_id": "acc694a8-3da6-411a-baa8-9e1ee860918c",
+      "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "migrations"
     }
   ],
