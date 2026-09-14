@@ -47,6 +47,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           CF_RADAR_DATABASE_ID: ${{ vars.CF_RADAR_DATABASE_ID || secrets.CF_RADAR_DATABASE_ID }}
           CF_RADAR_COLLECTOR_ENABLED: ${{ vars.CF_RADAR_COLLECTOR_ENABLED }}
+          CF_RADAR_MAX_SEARCHES_PER_HOUR: ${{ vars.CF_RADAR_MAX_SEARCHES_PER_HOUR }}
         run: node cloudflare/scripts/prepare-config.mjs
       - name: Check selected database name before any remote change
         env:
