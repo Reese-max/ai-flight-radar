@@ -1,14 +1,15 @@
-"""Create a small reviewable task plan. No writes/network unless --execute."""
+"""Create a reviewable task plan. No writes/network unless --execute."""
 import argparse
 from datetime import datetime,timedelta
 import json
 import os
 from pathlib import Path
 import sys
+import time
 from zoneinfo import ZoneInfo
-from collector import Client,SafeFailure
+from collector import Client,SafeFailure,ORIGINS,DESTINATIONS
 
-ROUTES = [('TPE','NRT'),('TPE','KIX'),('TPE','FUK'),('TPE','OKA'),('TPE','CTS'),('TPE','NGO')]
+ROUTES = [(o,d) for o in sorted(ORIGINS) for d in sorted(DESTINATIONS)]
 
 def plan(today,offset=30,nights=4):
     if type(offset) is not int or not 1 <= offset <= 300 or type(nights) is not int or not 1 <= nights <= 30:
@@ -28,8 +29,8 @@ def main():
         data = json.loads(args.file.read_text(encoding='utf-8'))
     else:
         data = plan(datetime.now(ZoneInfo('Asia/Taipei')).date())
-    if not isinstance(data,dict) or set(data) != {'tasks'} or not isinstance(data['tasks'],list) or not 1 <= len(data['tasks']) <= 24:
-        raise SafeFailure('Plan must contain 1-24 task objects')
+    if not isinstance(data,dict) or set(data) != {'tasks'} or not isinstance(data['tasks'],list) or not 1 <= len(data['tasks']) <= 96:
+        raise SafeFailure('Plan must contain 1-96 task objects')
     rendered = json.dumps(data,ensure_ascii=False,indent=2)+'\n'
     if args.output:
         with args.output.open('x',encoding='utf-8') as stream:
@@ -42,7 +43,11 @@ def main():
         raise SafeFailure('Review a saved --file before executing; implicit plans are never submitted')
     client = Client(os.getenv('RADAR_URL',''),os.getenv('RADAR_ADMIN_KEY',''),role='admin')
     client.verify()
-    print(json.dumps(client.call('/api/admin/tasks',data)))
+    tasks = data['tasks']
+    for i in range(0,len(tasks),24):
+        print(json.dumps(client.call('/api/admin/tasks',{'tasks':tasks[i:i+24]})))
+        if i+24 < len(tasks):
+            time.sleep(65)  # admin seed budget is one call per minute
 
 if __name__ == '__main__':
     try:
