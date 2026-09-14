@@ -1,0 +1,41 @@
+name: Cloudflare flight task seeding (bounded)
+# Monthly top-up: tasks self-reschedule every 6h until their depart_date passes,
+# so one seed keeps its routes covered for the life of the date window.
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: 'Submit the generated task plan now (requires admin key)'
+        type: boolean
+        default: false
+  schedule:
+    - cron: '23 1 1 * *'   # 1st of month 01:23 UTC = 09:23 Asia/Taipei
+permissions:
+  contents: read
+concurrency:
+  group: ai-flight-radar-cloudflare-seed
+  cancel-in-progress: false
+jobs:
+  seed:
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      vars.CF_RADAR_SEED_ENABLED == 'true' &&
+      (github.event_name == 'schedule' || inputs.execute == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Install task tooling dependency
+        run: python -m pip install tzdata
+      - name: Write the reviewable task plan
+        run: python cloudflare/scripts/tasks.py --output "$RUNNER_TEMP/plan.json"
+      - name: Submit the reviewed plan to the admin API
+        env:
+          RADAR_URL: ${{ vars.CF_RADAR_URL }}
+          RADAR_ADMIN_KEY: ${{ secrets.CF_RADAR_ADMIN_KEY }}
+        run: python cloudflare/scripts/tasks.py --file "$RUNNER_TEMP/plan.json" --execute
