@@ -25,8 +25,8 @@ def main():
     try:
         from collector import validate_task
         task = validate_task(json.loads(sys.stdin.read(16385)))
-        from providers.fast_flights_impl import FastFlightsProvider
-        offers = FastFlightsProvider().search(task['origin'],task['destination'],task['depart_date'],task['return_date'],max_stops=0)
+        from providers.selector import get_provider
+        offers = get_provider().search(task['origin'],task['destination'],task['depart_date'],task['return_date'],max_stops=0)
         print(json.dumps(normalize(offers,task)))
     except Exception:
         # Never print upstream HTML, response bodies, secrets, or raw exceptions.

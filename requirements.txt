@@ -8,3 +8,7 @@ httpx>=0.27,<0.29
 rich>=13,<15
 python-dotenv>=1,<2
 tzdata>=2024.1
+# Vendored Fli engine (third_party/fli) search path; cli/mcp extras not used.
+curl-cffi==0.16.3
+tenacity==8.5.0
+babel==2.18.0

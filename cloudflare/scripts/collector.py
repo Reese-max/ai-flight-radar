@@ -112,7 +112,8 @@ def search_subprocess(task: dict) -> dict:
     # locate under a stripped env; hand the child the resolved site dirs instead.
     extra = [p for p in (*site.getsitepackages(), site.getusersitepackages()) if p and os.path.isdir(p)]
     child_env['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(extra))
-    child_env.update(NTFY_ENABLED='false',TELEGRAM_ENABLED='false',PYTHON_DOTENV_DISABLED='1')
+    child_env.update(NTFY_ENABLED='false',TELEGRAM_ENABLED='false',PYTHON_DOTENV_DISABLED='1',
+                     RADAR_PRIMARY_PROVIDER=os.environ.get('RADAR_PRIMARY_PROVIDER','fast_flights'))
     try:
         result = subprocess.run([sys.executable,str(Path(__file__).with_name('search_once.py'))],
             input=json.dumps(task),text=True,capture_output=True,timeout=90,env=child_env,cwd=ROOT,check=False)
