@@ -94,8 +94,10 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(normalize([],task()),{'outcome':'empty'})
     def test_bad_airline_is_unknown_not_invented(self):
         self.assertIsNone(normalize([offer(primary_airline='bad\nname')],task())['airline'])
-    def test_initial_plan_is_small_and_same_dates(self):
-        p=plan(date(2026,9,11));self.assertEqual(len(p['tasks']),6);self.assertEqual(p['tasks'][0]['depart_date'],'2026-10-11')
+    def test_initial_plan_covers_full_route_matrix(self):
+        p=plan(date(2026,9,11));self.assertEqual(len(p['tasks']),48)
+        self.assertEqual(p['tasks'][0],{'origin':'KHH','destination':'CTS','depart_date':'2026-10-11','return_date':'2026-10-15'})
+        self.assertEqual(len({(t['origin'],t['destination']) for t in p['tasks']}),48)
     def test_invalid_plan_duration(self):
         with self.assertRaises(SafeFailure):plan(date(2026,9,11),nights=0)
 
