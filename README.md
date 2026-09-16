@@ -12,7 +12,7 @@ Figma UI 2.0 已實作為響應式網頁：桌面與手機導覽、報價篩選�
 python -m venv .venv
 source .venv/bin/activate
 # Windows PowerShell：.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-lock.txt   # 或 requirements.txt（人編 manifest）
 cp .env.example .env
 # Windows PowerShell：Copy-Item .env.example .env
 python main.py init
@@ -72,7 +72,7 @@ ntfy 與 Telegram 預設關閉，需在伺服器環境變數明確啟用並設�
 ## 測試
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev-lock.txt   # 或 requirements-dev.txt
 python -m pytest -q
 node --test tests/test_ui_logic.mjs
 # 選用瀏覽器測試：
@@ -82,6 +82,18 @@ python tests/browser_smoke.py
 ```
 
 CI 包含原有測試、UI/API 測試、Node 顯示邏輯、瀏覽器模擬與 Docker 建置／啟動檢查。測試使用臨時資料庫與合成 API 回應，不送真實通知、不購票，也不以模擬票價作為正式網站資料。通過 CI 不代表上游 Google Flights 永遠可用。
+
+## 依賴鎖定（reproducible builds）
+
+- `cloudflare/package-lock.json` 已提交；CI/deploy 一律 `npm ci`（lock 與 manifest 不一致時直接失敗）。
+- Python 人編 manifest 是 `requirements.txt` / `requirements-dev.txt`；審核過的解析結果提交為 `requirements-lock.txt` / `requirements-dev-lock.txt`，CI 與 collector 使用 lock 安裝。更新依賴時重跑：
+  ```bash
+  cd cloudflare && npm install --package-lock-only
+  uv pip compile requirements.txt -o requirements-lock.txt
+  uv pip compile requirements-dev.txt -o requirements-dev-lock.txt
+  ```
+- 第三方 GitHub Actions 固定到 commit SHA（`uses: owner/action@<sha> # vN`）。
+- `tests/test_dependency_locks.py` 是 deterministic 守門：lock 覆蓋不全、`npm install` 回流、Action 未 pin SHA 都會讓測試失敗。
 
 ## 文件與設計
 
