@@ -2,6 +2,11 @@ import {APP_ID,origins,destinations,routes} from './catalog.mjs';
 import {DAY,TTL,HttpError,requireThat,record,integer,text,timestamp,dateOnly,taipeiToday,addDays,codes,taskSpec,digest,summarize,quoteView} from './logic.mjs';
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const keyPattern=/^[0-9a-f]{64}$/;
+/* Issue #6: capacity contract — 48 seeded routes / 8h revisit = 6 claims/hour,
+   exactly the scheduled collector's authorized max (2 runs/hr × max 3 tasks).
+   A 6h revisit demanded 8 claims/hour and was mathematically unsustainable.
+   tests/test_seed_capacity.py asserts this invariant stays true. */
+const REVISIT_OK_MS=8*3600000;
 export async function ready(env){
   requireThat(env.APP_ID===APP_ID&&env.DB,'Deployment is not configured',503);
   const {results}=await env.DB.prepare("SELECT key,value FROM cf_radar_meta WHERE key IN ('app_id','schema_version')").all();
@@ -162,7 +167,7 @@ export async function complete(env,body,now){
       payload.return_date,payload.trip_days,payload.price_twd,payload.searched_at,JSON.stringify(payload),clean.lease_token,hash));
   statements.push(env.DB.prepare(`UPDATE cf_radar_tasks SET lease_owner=NULL,lease_until=0,next_run=?,last_outcome=?
     WHERE id=? AND lease_owner=? AND EXISTS(SELECT 1 FROM cf_radar_receipts WHERE token=? AND payload_hash=?)`)
-    .bind(now+(clean.outcome==='error'?3600000:6*3600000),clean.outcome,task.id,clean.lease_token,clean.lease_token,hash));
+    .bind(now+(clean.outcome==='error'?3600000:REVISIT_OK_MS),clean.outcome,task.id,clean.lease_token,clean.lease_token,hash));
   const result=await env.DB.batch(statements);
   const receipt=await env.DB.prepare('SELECT payload_hash FROM cf_radar_receipts WHERE token=?').bind(clean.lease_token).first();
   requireThat(receipt?.payload_hash===hash,'Lease was reassigned or payload conflicted',409);
