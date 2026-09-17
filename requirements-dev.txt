@@ -1,2 +1,4 @@
 -r requirements.txt
 pytest>=8,<10
+# Browser smoke test (tests/browser_smoke.py); locked in requirements-dev-lock.txt.
+playwright>=1.49,<2
