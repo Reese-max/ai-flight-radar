@@ -43,14 +43,14 @@ node --test cloudflare/tests/*.test.mjs
 python -m unittest discover -s cloudflare/tests -p 'test_*.py' -v
 python cloudflare/scripts/collector.py
 cd cloudflare
-npm install
+npm ci
 npm run build
 npm run wrangler-check
 npx --no-install wrangler d1 migrations apply DB --local
 npx --no-install wrangler dev
 ```
 
-前兩項測試用 SQLite 作 D1 介面替身；`wrangler dev` 才是實際 workerd/local D1。`collector.py` 沒有 `--execute` 就是零網路呼叫的 dry-run。npm 所產生的 package-lock 應保留並審閱；不要手寫假的鎖檔。正式憑證不應提供给套件安裝或離線測試。
+前兩項測試用 SQLite 作 D1 介面替身；`wrangler dev` 才是實際 workerd/local D1。`collector.py` 沒有 `--execute` 就是零網路呼叫的 dry-run。`package-lock.json` 已提交並由 `npm ci` 強制執行；更新方式見 [依賴鎖定](DEPENDENCIES.md)。正式憑證不應提供给套件安裝或離線測試。
 
 ## 價格與排程邊界
 

@@ -12,7 +12,7 @@ Figma UI 2.0 已實作為響應式網頁：桌面與手機導覽、報價篩選�
 python -m venv .venv
 source .venv/bin/activate
 # Windows PowerShell：.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install -r requirements-lock.txt
 cp .env.example .env
 # Windows PowerShell：Copy-Item .env.example .env
 python main.py init
@@ -72,22 +72,24 @@ ntfy 與 Telegram 預設關閉，需在伺服器環境變數明確啟用並設�
 ## 測試
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install -r requirements-dev-lock.txt
 python -m pytest -q
 node --test tests/test_ui_logic.mjs
-# 選用瀏覽器測試：
-python -m pip install playwright
+# 選用瀏覽器測試（playwright 套件已在 dev lock 內）：
 python -m playwright install chromium
 python tests/browser_smoke.py
 ```
 
-CI 包含原有測試、UI/API 測試、Node 顯示邏輯、瀏覽器模擬與 Docker 建置／啟動檢查。測試使用臨時資料庫與合成 API 回應，不送真實通知、不購票，也不以模擬票價作為正式網站資料。通過 CI 不代表上游 Google Flights 永遠可用。
+所有 Python/Node 安裝使用已提交的鎖檔（`requirements-lock.txt`、`requirements-dev-lock.txt`、`cloudflare/package-lock.json`），更新與回滾程序見 [依賴鎖定](docs/DEPENDENCIES.md)。
+
+CI 包含原有測試、UI/API 測試、Node 顯示邏輯、瀏覽器模擬、依賴鎖定閘門與 Docker 建置／啟動檢查。測試使用臨時資料庫與合成 API 回應，不送真實通知、不購票，也不以模擬票價作為正式網站資料。通過 CI 不代表上游 Google Flights 永遠可用。
 
 ## 文件與設計
 
 - [Figma 設計](https://www.figma.com/design/JPE9g17smfFB6R7eKxjRDr?node-id=6-2)
 - [UI 實作、資產來源與功能邊界](docs/UI_IMPLEMENTATION.md)
 - [部署與維運](docs/DEPLOYMENT.md)
+- [依賴鎖定與可重建安裝](docs/DEPENDENCIES.md)
 - [已知開源專案與工具：目的、採用狀態、限制](docs/OPEN_SOURCE_STACK.md)
 - [價格判斷方法](docs/PRICE_INTELLIGENCE.md)
 - [後續路線圖](docs/ROADMAP.md)
