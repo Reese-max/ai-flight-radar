@@ -37,7 +37,12 @@ python main.py server
 | 手動查價 | 一次提交一個任務；公網模式限管理員金鑰及每分鐘一次 |
 | 程序狀態 | 依真正心跳檔顯示；成功抓票需另外看到新資料庫快照 |
 
-目前只有一個實際航空報價來源：`fast-flights 3.1.0` 取得 Google Flights 搜尋資料。多 Provider 與私人雲端追蹤仍在路線圖，不把計畫寫成已完成。
+實際航空報價來源有兩個 Provider，可經由 `RADAR_PRIMARY_PROVIDER` 切換：
+
+- `fast_flights`（預設）：`fast-flights 3.1.0` 取得 Google Flights 搜尋資料。
+- `fli_custom`（遷移中）：`third_party/fli/` 逐字收錄的 `punitarani/fli` 引擎（MIT，出處見 `docs/UPSTREAM_FLI.md`），由 `providers/fli_custom/` 正規化為既有的 `StandardFlightOffer`。額外提供有上限的彈性日期搜尋 `search_dates`（視窗 ≤61 天、每計畫 ≤4 次上游請求）與多機場查詢（每側 ≤3 機場、單一上游請求）。
+
+`RADAR_FALLBACK_PROVIDER` 指定明確的備援來源；收集流程不會在任務中途靜默切換。生產主來源在校準證據（`RADAR_CALIBRATION_ENABLED=true python cloudflare/scripts/calibrate_fli.py --execute`，收據見 `docs/calibration/`）通過人工檢視前維持 `fast_flights`。私人雲端追蹤仍在路線圖，不把計畫寫成已完成。
 
 ## 價格判斷
 

@@ -1,4 +1,5 @@
-"""Map vendored Fli ``FlightResult`` objects onto AI Flight Radar's domain model.
+"""Map vendored Fli ``FlightResult``/``DatePrice`` objects onto AI Flight Radar's
+domain model.
 
 Pure duck-typed mapping: this module never imports ``fli.*`` so offline tests can
 feed it fixtures without the upstream package or its heavy dependencies.
@@ -10,6 +11,9 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import List, Optional, Tuple
 
 from providers.base import FlightLeg, StandardFlightOffer
+from providers.fli_custom.models import FlexibleDateOffer
+
+EXPECTED_CURRENCY = "TWD"
 
 
 def _airline_name(airline) -> Optional[str]:
@@ -25,13 +29,38 @@ def _price_twd(result) -> int:
     price = getattr(result, "price", None)
     if price is None:
         raise ValueError("price not surfaced by upstream")
-    numeric = Decimal(str(price))
+    try:
+        numeric = Decimal(str(price))
+    except InvalidOperation:
+        raise ValueError("Invalid price") from None
     if not numeric.is_finite() or numeric <= 0:
         raise ValueError("Invalid price")
     value = int(numeric.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     if value < 1:
         raise ValueError("Price rounds below one TWD")
     return value
+
+
+def _currency(result) -> Optional[str]:
+    """Return the upstream-reported ISO currency, or ``None`` when not surfaced.
+    A present-but-foreign currency means ``price`` is not TWD — reject rather
+    than relabel."""
+    value = getattr(result, "currency", None)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    code = value.strip().upper()
+    if code != EXPECTED_CURRENCY:
+        raise ValueError("price is not in the requested TWD currency")
+    return code
+
+
+def _airport_code(airport):
+    """Enum ``.name`` is the IATA code; a few members carry a leading underscore
+    which upstream strips when serializing — mirror that normalization."""
+    name = getattr(airport, "name", airport)
+    return name.removeprefix("_") if isinstance(name, str) else name
 
 
 def _map_legs(result) -> List[FlightLeg]:
@@ -42,10 +71,8 @@ def _map_legs(result) -> List[FlightLeg]:
         arr = getattr(leg, "arrival_datetime", None)
         duration = getattr(leg, "duration", None) or 0
         legs.append(FlightLeg(
-            origin=getattr(getattr(leg, "departure_airport", None), "name",
-                           getattr(leg, "departure_airport", "")),
-            destination=getattr(getattr(leg, "arrival_airport", None), "name",
-                                getattr(leg, "arrival_airport", "")),
+            origin=_airport_code(getattr(leg, "departure_airport", "")),
+            destination=_airport_code(getattr(leg, "arrival_airport", "")),
             departure_time=dep.strftime("%H:%M") if dep else "00:00",
             arrival_time=arr.strftime("%H:%M") if arr else "00:00",
             duration_mins=int(duration),
@@ -75,6 +102,20 @@ def map_result(raw, ctx) -> StandardFlightOffer:
             continue
     if price is None:
         raise ValueError("price not surfaced by upstream")
+
+    currency = None
+    booking_ref = None
+    for part in parts:
+        if part is None:
+            continue
+        if currency is None:
+            currency = _currency(part)  # raises when a stated currency is not TWD
+        else:
+            _currency(part)
+        if booking_ref is None:
+            token = getattr(part, "booking_token", None)
+            if isinstance(token, str) and token.strip():
+                booking_ref = token.strip()
 
     legs = _map_legs(outbound)
     out_leg_count = len(legs)
@@ -106,5 +147,45 @@ def map_result(raw, ctx) -> StandardFlightOffer:
         depart_time_str=legs[0].departure_time,
         arrival_time_str=legs[out_leg_count - 1].arrival_time,
         total_duration_mins=sum(leg.duration_mins for leg in legs),
+        currency=currency, booking_ref=booking_ref,
+        searched_at=datetime.utcnow(),
+    )
+
+
+def map_date_price(raw, ctx) -> FlexibleDateOffer:
+    """Map one upstream ``DatePrice`` calendar row into a normalized offer.
+
+    ``ctx`` carries ``origin``, ``destination``, ``trip_type``, ``from_date``,
+    ``to_date`` and ``duration_days`` — the request the row must answer. Rows
+    outside that plan are rejected rather than trimmed into something else."""
+    dates = getattr(raw, "date", None)
+    if not isinstance(dates, tuple) or not 1 <= len(dates) <= 2:
+        raise ValueError("date tuple missing")
+    if not all(isinstance(d, datetime) for d in dates):
+        raise ValueError("date tuple is not datetime-typed")
+
+    price = _price_twd(raw)
+    currency = _currency(raw)
+
+    depart = dates[0].date().isoformat()
+    ret = dates[1].date().isoformat() if len(dates) == 2 else None
+    if not (ctx["from_date"] <= depart <= ctx["to_date"]):
+        raise ValueError("depart date outside the requested window")
+
+    if ctx["trip_type"] == "round-trip":
+        if ret is None:
+            raise ValueError("round-trip row is missing a return date")
+        duration = (dates[1] - dates[0]).days
+        if duration != ctx["duration_days"]:
+            raise ValueError("trip duration differs from the requested one")
+    else:
+        if ret is not None:
+            raise ValueError("one-way row carries an unexpected return date")
+        duration = None
+
+    return FlexibleDateOffer(
+        provider="fli_custom", origin=ctx["origin"], destination=ctx["destination"],
+        trip_type=ctx["trip_type"], depart_date=depart, return_date=ret,
+        duration_days=duration, price_twd=price, currency=currency,
         searched_at=datetime.utcnow(),
     )
