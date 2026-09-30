@@ -1,0 +1,136 @@
+{
+  "tool": "calibrate_fli",
+  "schema_version": 1,
+  "ran_at": "2026-09-30T12:12:55.156260Z",
+  "engine": "fli_custom",
+  "python": "3.11.16",
+  "budget": {
+    "max_cases": 7
+  },
+  "cases": [
+    {
+      "id": "tpe-nrt-roundtrip-direct",
+      "kind": "search",
+      "outcome": "ok",
+      "expect": null,
+      "observations": 63,
+      "lowest_price_twd": 10186,
+      "airlines": [
+        "台灣虎航",
+        "樂桃航空",
+        "酷航"
+      ],
+      "checks": {
+        "route_match": true,
+        "dates_match": true,
+        "positive_price": true,
+        "direct_only": true,
+        "currency_ok": true
+      }
+    },
+    {
+      "id": "tsa-hnd-roundtrip-direct",
+      "kind": "search",
+      "outcome": "ok",
+      "expect": null,
+      "observations": 14,
+      "lowest_price_twd": 19226,
+      "airlines": [
+        "中華航空",
+        "日本航空",
+        "長榮航空"
+      ],
+      "checks": {
+        "route_match": true,
+        "dates_match": true,
+        "positive_price": true,
+        "direct_only": true,
+        "currency_ok": true
+      }
+    },
+    {
+      "id": "khh-nrt-oneway-direct",
+      "kind": "search",
+      "outcome": "ok",
+      "expect": null,
+      "observations": 7,
+      "lowest_price_twd": 4123,
+      "airlines": [
+        "中華航空",
+        "台灣虎航",
+        "捷星日本航空",
+        "泰國亞洲航空",
+        "聯合航空"
+      ],
+      "checks": {
+        "route_match": true,
+        "dates_match": true,
+        "positive_price": true,
+        "direct_only": true,
+        "currency_ok": true
+      }
+    },
+    {
+      "id": "rmq-cts-roundtrip-direct",
+      "kind": "search",
+      "outcome": "empty",
+      "expect": "empty-allowed"
+    },
+    {
+      "id": "tpe-oka-roundtrip-direct",
+      "kind": "search",
+      "outcome": "empty",
+      "expect": null
+    },
+    {
+      "id": "tpe-kix-dates-4to6d",
+      "kind": "dates",
+      "outcome": "ok",
+      "expect": null,
+      "observations": 25,
+      "lowest_price_twd": 7012,
+      "airlines": [],
+      "checks": {
+        "route_match": true,
+        "window_match": true,
+        "positive_price": true,
+        "duration_allowed": true,
+        "return_matches_duration": true,
+        "currency_ok": true
+      }
+    },
+    {
+      "id": "tpe-nrt-dates-oneway",
+      "kind": "dates",
+      "outcome": "ok",
+      "expect": null,
+      "observations": 15,
+      "lowest_price_twd": 3640,
+      "airlines": [],
+      "checks": {
+        "route_match": true,
+        "window_match": true,
+        "positive_price": true,
+        "duration_allowed": true,
+        "return_matches_duration": true,
+        "currency_ok": true
+      }
+    }
+  ],
+  "summary": {
+    "attempted": 7,
+    "ok": 5,
+    "empty": 2,
+    "invalid": 0,
+    "error": 0
+  },
+  "verdict": {
+    "criteria_passed": true,
+    "unexpected_empty": [
+      "tpe-oka-roundtrip-direct"
+    ],
+    "production_switch": "eligible-for-review",
+    "note": "Receipt only — RADAR_PRIMARY_PROVIDER stays 'fast_flights' until a human flips it after reviewing this evidence."
+  },
+  "receipt_path": "docs/calibration/fli-calibration-20260930T121213Z.json"
+}

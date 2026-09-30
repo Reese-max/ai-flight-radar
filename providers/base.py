@@ -29,6 +29,8 @@ class StandardFlightOffer(BaseModel):
     depart_time_str: Optional[str] = None
     arrival_time_str: Optional[str] = None
     total_duration_mins: Optional[int] = None
+    currency: Optional[str] = None
+    booking_ref: Optional[str] = None
     searched_at: datetime
 
 class BaseFlightProvider(ABC):
