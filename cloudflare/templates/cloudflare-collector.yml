@@ -8,9 +8,11 @@ on:
         description: 'Run up to three live search tasks (requires both enable flags)'
         type: boolean
         default: false
-  # To enable hourly runs AFTER validation, uncomment:
+  # To enable scheduled runs AFTER validation, uncomment — the cadence must
+  # match the capacity invariant in docs/CLOUDFLARE.md (2 runs/hour x 3 tasks
+  # = 6 claims/hour, matching the 8h revisit of the seeded 48-route matrix):
   # schedule:
-  #   - cron: '17 * * * *'
+  #   - cron: '17,47 * * * *'
 permissions:
   contents: read
 concurrency:

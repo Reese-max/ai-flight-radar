@@ -1,5 +1,5 @@
 name: Cloudflare flight task seeding (bounded)
-# Monthly top-up: tasks self-reschedule every 6h until their depart_date passes,
+# Monthly top-up: tasks self-reschedule every 8h until their depart_date passes,
 # so one seed keeps its routes covered for the life of the date window.
 on:
   workflow_dispatch:
