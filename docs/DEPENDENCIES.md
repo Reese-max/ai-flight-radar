@@ -26,7 +26,7 @@ cd cloudflare && npm ci                               # Worker / Wrangler
 ## 更新依賴（reviewable update）
 
 1. 編輯人工清單：`requirements.txt`、`requirements-dev.txt` 或 `cloudflare/package.json`。
-2. 執行 `bash scripts/refresh-locks.sh`，重新產生三份鎖檔（uv `pip compile --generate-hashes --universal --python-version 3.12`，npm `--package-lock-only`；解析器版本固定於腳本內）。
+2. 執行 `bash scripts/refresh-locks.sh`，重新產生三份鎖檔（uv `pip compile --generate-hashes --universal --python-version 3.12`，固定 npm `10.9.2 --package-lock-only`；解析器版本固定於腳本內）。
 3. 在 PR diff 中審核**依賴圖變更**：鎖檔裡的 `name==version` 行、雜湊變更、`resolved` URL。這是本次變更真正的供應鏈差異。
 4. CI 的 `dependency-gate` job 會從兩份鎖檔全新安裝，再重跑 refresh 腳本；若有任何已追蹤檔案被改動（清單改了但鎖檔未重產生、或解析器輸出漂移），即失敗。
 

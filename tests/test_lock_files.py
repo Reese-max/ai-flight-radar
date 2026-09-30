@@ -129,3 +129,11 @@ def test_refresh_script_and_documentation_exist():
     docs = (ROOT / "docs" / "DEPENDENCIES.md").read_text(encoding="utf-8")
     for needle in ("refresh-locks.sh", "npm ci", "rollback"):
         assert needle in docs, f"docs/DEPENDENCIES.md missing {needle}"
+
+
+def test_refresh_script_pins_exact_resolver_versions():
+    text = (ROOT / "scripts" / "refresh-locks.sh").read_text(encoding="utf-8")
+    assert 'UV_VERSION="0.12.9"' in text
+    assert 'NPM_VERSION="10.9.2"' in text
+    assert '"npm@${NPM_VERSION}"' in text
+    assert "NPM_MAJOR" not in text

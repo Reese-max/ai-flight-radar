@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 # Resolver versions are pinned here so every machine regenerates the same
 # artifacts byte-for-byte. Bump these deliberately, never by accident.
 UV_VERSION="0.12.9"
-NPM_MAJOR="10"   # Node 22's bundled npm; matches actions/setup-node '22' jobs.
+NPM_VERSION="10.9.2"   # Pin the lockfile generator, independent of the runner's npm patch.
 
 uv_compile() {
     # Use an identical resolver version everywhere: ambient uv if it already
@@ -30,7 +30,7 @@ uv_compile requirements-dev.txt \
     --output-file requirements-dev-lock.txt \
     --generate-hashes --universal --python-version 3.12
 
-(cd cloudflare && npx --yes "npm@${NPM_MAJOR}" install --package-lock-only \
+(cd cloudflare && npx --yes "npm@${NPM_VERSION}" install --package-lock-only \
     --ignore-scripts --no-audit --no-fund)
 
 echo "Regenerated: requirements-lock.txt, requirements-dev-lock.txt, cloudflare/package-lock.json"
