@@ -99,7 +99,7 @@ Evidence legend: `SRC` = SOURCE_CONFIRMED at inspected SHA; `CI-current` = actua
 | C01 | Public-sector reviewer | Explain why a fare was shown | Trace source/age/status | Source fields exist; ~48% live error rate lacks typed cause for audit trail | SYN+SRC+CI-current | P1-gate #1 |
 | C02 | Low-learning-cost user | Simple shared comparison | Core task without account workflow | Read-only comparison remains suitable; no new blocker found | SYN+SRC | — |
 | C03 | Cautious purchaser | Follow source before decision | Clear mismatch boundary | README/UI warn observed/final unknown; booking fidelity not executed | SYN+SRC, NRV | P1-gate #1 |
-| C04 | Interrupted long-flow user | Save watch → close/reopen | Recover without accidental scan | Browser-local persistence exercised on current SHA (CI smoke) | SYN+SRC+CI-current | — |
+| C04 | Interrupted long-flow user | Save watch → close/reopen | Recover without accidental scan | Browser-local persistence source unchanged; restart path current SHA not executed | SYN+SRC, NRV | — |
 | C05 | SRE / service owner | Sustain configured radar coverage | Bounded, observable, feasible schedule | 48/6h demand vs 6/h capacity persists; live runs additionally lose ~half of attempts to errors; `batch_error` correctly reaches UI label via build adapter | SYN+SRC+CI-current | **P2 #6**; #1 live gate |
 | D01 | Manager reading status | Inspect abnormal/coverage state | Status reflects real service quality | `worker.status` batch semantics verified through `build.mjs` label injection (no gap); production status currently dominated by error batches | SYN+SRC+CI-current | **P2 #6** + #1 |
 | D02 | PM / audit operator | Trace task → observation → cadence | Reconstruct progress and coverage | Leases/receipts trace tasks; configured throughput cannot meet stated cadence, and measured error rate worsens it | SYN+SRC+CI-current | **P2 #6** + #1 |
@@ -114,7 +114,7 @@ Evidence legend: `SRC` = SOURCE_CONFIRMED at inspected SHA; `CI-current` = actua
 | F01 | Senior first-time mobile user | Find one quote | Clear text/buttons | Mobile-width path exercised on current SHA; senior-specific runtime absent | SYN+CI-current, NRV | — |
 | F02 | Low-vision user | Zoom/high contrast | Status not color-only | Text status exists; AT/contrast execution absent | SYN+SRC, NRV | — |
 | F03 | Low motor precision | Tap mobile navigation/cards | Core path without precision | Narrow layout verified on current SHA; motor-target sizing unmeasured | SYN+CI-current, NRV | — |
-| F04 | Memory-load sensitive user | Pause watch and return | Persistent labeled state | Local watch contract unchanged; resume execution covered by CI smoke persistence checks | SYN+SRC+CI-current | — |
+| F04 | Memory-load sensitive user | Pause watch and return | Persistent labeled state | Local watch contract unchanged; resume execution absent | SYN+SRC, NRV | — |
 | F05 | Assisted setup user | Helper configures; user browses | Routine use hides admin credentials | Read/admin separation remains; production/browser proof incomplete | SYN+SRC, NRV | — |
 | G01 | Keyboard-only user | Filter/detail with keyboard/Escape | Reachable controls/focus recovery | Historical focus fixture pattern retained; current keyboard sweep not executed | SYN+SRC+CI-old, NRV | — |
 | G02 | Screen-reader user | Navigate search/detail/status | Meaningful labels/structure | No screen-reader receipt at any SHA; no new deterministic blocker found | SYN, NRV | — |
