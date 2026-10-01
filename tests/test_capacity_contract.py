@@ -197,6 +197,19 @@ def test_cf_ui_stale_threshold_matches_revisit():
     assert adapted == revisit
 
 
+def test_build_emits_adapted_logic_not_raw_shared_source():
+    """The emitted assets/logic.mjs must be the adaptLogic() output — a
+    refactor that copies the shared file raw would silently re-advertise
+    the shared app's stale marker on the Cloudflare bundle."""
+    build = _read("cloudflare/build.mjs")
+    assert "adaptLogic(await readFile" in build, (
+        "build() does not feed the shared staleness source through adaptLogic"
+    )
+    assert re.search(r"writeFile\([^)]*logic\.mjs'\)\s*,\s*logic\s*\)", build), (
+        "build() must emit the adapted logic source, not the raw shared copy"
+    )
+
+
 def test_error_retry_is_shorter_than_revisit():
     revisit, retry = _revisit_and_retry_hours()
     assert retry < revisit
