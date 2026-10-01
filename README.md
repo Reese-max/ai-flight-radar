@@ -12,7 +12,7 @@ Figma UI 2.0 已實作為響應式網頁：桌面與手機導覽、報價篩選�
 python -m venv .venv
 source .venv/bin/activate
 # Windows PowerShell：.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+python -m pip install --require-hashes -r requirements.lock
 cp .env.example .env
 # Windows PowerShell：Copy-Item .env.example .env
 python main.py init
@@ -72,14 +72,17 @@ ntfy 與 Telegram 預設關閉，需在伺服器環境變數明確啟用並設�
 ## 測試
 
 ```bash
-python -m pip install -r requirements-dev.txt
+python -m pip install --require-hashes -r requirements-dev.lock
 python -m pytest -q
 node --test tests/test_ui_logic.mjs
 # 選用瀏覽器測試：
-python -m pip install playwright
 python -m playwright install chromium
 python tests/browser_smoke.py
 ```
+
+依賴安裝一律使用已提交的 `requirements.lock` / `requirements-dev.lock` /
+`cloudflare/package-lock.json`；`requirements*.txt` 與 `package.json`
+是人工編輯的清單，更新方式與回滾步驟見 [依賴鎖定文件](docs/DEPENDENCIES.md)。
 
 CI 包含原有測試、UI/API 測試、Node 顯示邏輯、瀏覽器模擬與 Docker 建置／啟動檢查。測試使用臨時資料庫與合成 API 回應，不送真實通知、不購票，也不以模擬票價作為正式網站資料。通過 CI 不代表上游 Google Flights 永遠可用。
 

@@ -1,11 +1,11 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f # python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     API_HOST=0.0.0.0 DB_PATH=/app/data/flights.db \
     DEPLOYMENT_MODE=public AUTOSCAN_ENABLED=false \
     NTFY_ENABLED=false TELEGRAM_ENABLED=false
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+COPY requirements.lock ./
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock \
     && useradd --create-home --uid 10001 radar
 COPY --chown=radar:radar . .
 RUN mkdir -p /app/data && chown radar:radar /app/data

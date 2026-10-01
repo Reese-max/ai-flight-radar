@@ -41,9 +41,8 @@ node scripts/local-server.mjs
 
 ## 雲端工具
 
-`package.json` 的 Wrangler 固定為官方已發布的 `4.131.0`。
-目前環境無法下載套件，因此沒有假造 `package-lock.json`，也沒有執行 Wrangler。
-網路可用時先執行 `npm install`、審閱鎖檔、執行 `npm run build` 及 `npm run wrangler-check`。
+`package.json` 的 Wrangler 固定為官方已發布的 `4.131.0`，相依圖鎖在已提交的
+`package-lock.json`；用 `npm ci` 安裝相同圖後執行 `npm run build` 及 `npm run wrangler-check`。
 `wrangler-check` 僅 dry-run；不是部署。
 
 完整設定、可用範圍、免費層限制、金鑰與驗收見 `../docs/CLOUDFLARE.md`。

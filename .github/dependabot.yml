@@ -1,0 +1,27 @@
+version: 2
+# Automated, reviewable dependency-update PRs (issue #2). npm and docker updates
+# regenerate their pinned artifacts (package-lock.json, the base-image digest);
+# Python manifest updates must regenerate requirements.lock /
+# requirements-dev.lock in the same PR — the dependency-locks job in ci.yml
+# fails any PR whose committed locks drift.
+updates:
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "npm"
+    directory: "/cloudflare"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
