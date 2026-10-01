@@ -4,7 +4,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$DIR"
 PYTHON="$DIR/.venv/bin/python"
 if [[ ! -x "$PYTHON" ]]; then
-    echo "Create the environment: python3 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt" >&2
+    echo "Create the environment: python3 -m venv .venv && .venv/bin/python -m pip install --require-hashes -r requirements.lock" >&2
     exit 1
 fi
 CMD="${1:-status}"

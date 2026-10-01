@@ -43,7 +43,7 @@ node --test cloudflare/tests/*.test.mjs
 python -m unittest discover -s cloudflare/tests -p 'test_*.py' -v
 python cloudflare/scripts/collector.py
 cd cloudflare
-npm install
+npm ci
 npm run build
 npm run wrangler-check
 npx --no-install wrangler d1 migrations apply DB --local
