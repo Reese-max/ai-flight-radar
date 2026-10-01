@@ -1,5 +1,5 @@
 import {APP_ID,origins,destinations,routes} from './catalog.mjs';
-import {DAY,TTL,HttpError,requireThat,record,integer,text,timestamp,dateOnly,taipeiToday,addDays,codes,taskSpec,digest,summarize,quoteView} from './logic.mjs';
+import {DAY,TTL,REVISIT_MS,HttpError,requireThat,record,integer,text,timestamp,dateOnly,taipeiToday,addDays,codes,taskSpec,digest,summarize,quoteView} from './logic.mjs';
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const keyPattern=/^[0-9a-f]{64}$/;
 export async function ready(env){
@@ -103,7 +103,7 @@ export async function enqueue(env,body,now){
 export async function claim(env,body,now){
   record(body,['run_id']);requireThat(uuid.test(body.run_id),'Invalid run ID');
   requireThat(env.COLLECTOR_ENABLED==='true','Collector is disabled',503);
-  const limit=Number(env.MAX_SEARCHES_PER_HOUR||'3');integer(limit,1,10,'server claim budget');
+  const limit=Number(env.MAX_SEARCHES_PER_HOUR||'6');integer(limit,1,10,'server claim budget');
   await budget(env.DB,'collector_claim',limit,3600000,now);
   const token=crypto.randomUUID();
   const task=await env.DB.prepare(`UPDATE cf_radar_tasks SET lease_owner=?,lease_until=?
@@ -162,7 +162,7 @@ export async function complete(env,body,now){
       payload.return_date,payload.trip_days,payload.price_twd,payload.searched_at,JSON.stringify(payload),clean.lease_token,hash));
   statements.push(env.DB.prepare(`UPDATE cf_radar_tasks SET lease_owner=NULL,lease_until=0,next_run=?,last_outcome=?
     WHERE id=? AND lease_owner=? AND EXISTS(SELECT 1 FROM cf_radar_receipts WHERE token=? AND payload_hash=?)`)
-    .bind(now+(clean.outcome==='error'?3600000:6*3600000),clean.outcome,task.id,clean.lease_token,clean.lease_token,hash));
+    .bind(now+(clean.outcome==='error'?3600000:REVISIT_MS),clean.outcome,task.id,clean.lease_token,clean.lease_token,hash));
   const result=await env.DB.batch(statements);
   const receipt=await env.DB.prepare('SELECT payload_hash FROM cf_radar_receipts WHERE token=?').bind(clean.lease_token).first();
   requireThat(receipt?.payload_hash===hash,'Lease was reassigned or payload conflicted',409);

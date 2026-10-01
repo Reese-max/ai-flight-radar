@@ -1,6 +1,6 @@
 /** Pure validation and statistics. No network or database side effects. */
 import {origins,destinations} from './catalog.mjs';
-export const DAY=86400000, TTL=6*3600000;
+export const DAY=86400000, TTL=8*3600000, REVISIT_MS=8*3600000;
 export class HttpError extends Error {
   constructor(status,detail,headers={}) {super(detail);this.status=status;this.headers=headers;}
 }

@@ -23,8 +23,13 @@ export function adaptHTML(source){
     ['/docs/DEPLOYMENT.md','/docs/CLOUDFLARE.md'],
     ['程序心跳只代表程序存在，成功查價必須有新快照。','批次回報不代表查價成功；成功查價必須另有新快照。'],
     ['每一列是不同日期組合的最低觀測價','每一列是不同日期組合的最新觀測价'.replace('价','價')],
+    ['報價超過六小時會標示需要重新查證','報價超過八小時會標示需要重新查證'],
   ];
   for(const [from,to]of replacements)source=replaceRequired(source,from,to);return source;
+}
+export function adaptLogic(source){
+  // Cloudflare revisit/TTL is 8h; the shared web copy carries the main app's 6h.
+  return replaceRequired(source,'now - timestamp > 6*3600000','now - timestamp > 8*3600000');
 }
 export function adaptJS(source){
   source=replaceRequired(source,"not_started:'尚未啟動'","not_started:'尚未啟動',batch_ok:'最近批次有報價',batch_empty:'最近批次無新報價',batch_error:'最近批次異常'");
@@ -43,6 +48,7 @@ export async function build(root=fileURLToPath(new URL('..',import.meta.url))){
   // Validate source compatibility before removing a previous generated build.
   const html=adaptHTML(await readFile(path.join(from,'index.html'),'utf8'));
   const js=adaptJS(await readFile(path.join(from,'assets/app.js'),'utf8'));
+  const logic=adaptLogic(await readFile(path.join(from,'assets/logic.mjs'),'utf8'));
   async function copy(dir,to){
     await mkdir(to,{recursive:true});
     for(const entry of await readdir(dir,{withFileTypes:true})){
@@ -55,6 +61,7 @@ export async function build(root=fileURLToPath(new URL('..',import.meta.url))){
   await copy(path.join(from,'assets'),path.join(output,'assets'));
   await writeFile(path.join(output,'index.html'),html);
   await writeFile(path.join(output,'assets/app.js'),js);
+  await writeFile(path.join(output,'assets/logic.mjs'),logic);
   await writeFile(path.join(output,'_headers'),STATIC_HEADERS);
   return output;
 }
