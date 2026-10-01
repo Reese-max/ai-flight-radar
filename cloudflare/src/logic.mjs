@@ -1,6 +1,13 @@
 /** Pure validation and statistics. No network or database side effects. */
 import {origins,destinations} from './catalog.mjs';
-export const DAY=86400000, TTL=6*3600000;
+export const DAY=86400000, HOUR=3600000, ERROR_BACKOFF_MS=HOUR;
+/** Revisit interval of a completed ok/empty task. Capacity contract:
+ *  active routes / REVISIT_HOURS <= scheduled runs per hour * max tasks per run,
+ *  and <= the deployed hourly claim budget. 48 routes at 12h = 4 claims/hour of
+ *  the 6 claims/hour the bounded collector can serve. */
+export const REVISIT_HOURS=12, REVISIT_MS=REVISIT_HOURS*HOUR;
+/** An observation stays listed as a valid quote until its refresh is due. */
+export const TTL=REVISIT_MS;
 export class HttpError extends Error {
   constructor(status,detail,headers={}) {super(detail);this.status=status;this.headers=headers;}
 }

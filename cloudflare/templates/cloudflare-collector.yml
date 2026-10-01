@@ -8,9 +8,12 @@ on:
         description: 'Run up to three live search tasks (requires both enable flags)'
         type: boolean
         default: false
-  # To enable hourly runs AFTER validation, uncomment:
+  # To enable scheduled runs AFTER validation, uncomment only a cadence that
+  # `python cloudflare/scripts/collector.py --check-capacity` reports as
+  # sustainable. One run per hour serves 3 claims/hour and starves the
+  # 48-route matrix, which needs 4 claims/hour at the 12h revisit interval:
   # schedule:
-  #   - cron: '17 * * * *'
+  #   - cron: '17,47 * * * *'
 permissions:
   contents: read
 concurrency:

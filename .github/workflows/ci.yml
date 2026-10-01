@@ -29,7 +29,7 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pip check
-      - run: python -m compileall -q ai api config core engine notifier providers deploy main.py
+      - run: python -m compileall -q ai api config core engine notifier providers deploy cloudflare/scripts main.py
       - run: python -m pytest -q
       - run: node --test tests/test_ui_logic.mjs
       - run: python main.py --help
