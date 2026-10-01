@@ -15,6 +15,7 @@ import site
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -126,6 +127,163 @@ def search_subprocess(task: dict) -> dict:
     except (subprocess.TimeoutExpired,OSError,ValueError):
         return {'outcome':'error'}
 
+def cron_runs_per_hour(expression: str) -> int:
+    """Scheduled runs per hour for a cron expression that fires every day.
+
+    Fails closed on a cadence this contract cannot reason about, instead of
+    guessing a service rate that would silently overstate collector capacity.
+    """
+    fields = expression.split()
+    if len(fields) != 5:
+        raise SafeFailure('Collector cron must have five fields')
+    minute, hour, day_of_month, month, day_of_week = fields
+    if (day_of_month, month, day_of_week) != ('*', '*', '*'):
+        raise SafeFailure('Collector cron must run every day')
+    def count(field: str, bound: int, name: str) -> int:
+        total = 0
+        for value in field.split(','):
+            if value == '*':
+                total += bound
+            elif value.startswith('*/'):
+                step = value[2:]
+                if not step.isdigit() or int(step) < 1 or bound % int(step):
+                    raise SafeFailure(f'Unsupported collector cron {name} step')
+                total += bound // int(step)
+            elif value.isdigit() and 0 <= int(value) < bound:
+                total += 1
+            else:
+                raise SafeFailure(f'Unsupported collector cron {name} field')
+        return total
+    minutes, hours = count(minute, 60, 'minute'), count(hour, 24, 'hour')
+    if hours == 24:
+        return minutes
+    if minutes * hours % 24:
+        raise SafeFailure('Collector cron does not give a uniform hourly service rate')
+    return minutes * hours // 24
+
+CRON_PATTERN = re.compile(r"^\s*-\s*cron:\s*['\"]?([^'\"\n]+)['\"]?\s*$", re.MULTILINE)
+MAX_TASKS_PATTERN = re.compile(r'--max-tasks\s+(\d+)')
+REVISIT_PATTERN = re.compile(r'REVISIT_HOURS\s*=\s*(\d+)')
+REVISIT_DERIVATION = 'REVISIT_MS=REVISIT_HOURS*HOUR'
+BACKOFF_DERIVATION = 'ERROR_BACKOFF_MS=HOUR'
+TTL_DERIVATION = 'TTL=REVISIT_MS'
+CLAIM_BUDGET_PATTERN = re.compile(r'"MAX_SEARCHES_PER_HOUR"\s*:\s*"?(\d+)"?')
+
+def _read_text(path: Path) -> str:
+    try:
+        return path.read_text(encoding='utf-8')
+    except OSError:
+        raise SafeFailure(f'Cannot read {path.name} for the coverage contract') from None
+
+def coverage_plan(root: Path = ROOT, active_routes: int | None = None, revisit_hours: int | None = None,
+                  runs_per_hour: int | None = None, max_tasks_per_run: int | None = None,
+                  claim_budget: int | None = None) -> dict:
+    """Planned coverage demand and planned service capacity, from checked-in files.
+
+    Demand is one revisit of every active route per interval. Capacity is the
+    scheduled batches per hour times the bounded tasks per batch, itself capped
+    by the deployed hourly claim budget. A configuration where demand exceeds
+    capacity starves routes under normal zero-error operation, so it is
+    reported as unsustainable instead of being discovered as stale prices.
+    """
+    if active_routes is None:
+        active_routes = len(ORIGINS) * len(DESTINATIONS)
+    if type(active_routes) is not int or active_routes < 1:
+        raise SafeFailure('Active route count must be a positive integer')
+    workflow = _read_text(root / '.github/workflows/collector.yml')
+    logic = _read_text(root / 'cloudflare/src/logic.mjs')
+    store = _read_text(root / 'cloudflare/src/store.mjs')
+    # A generated deploy config is what actually ships, so it wins when present.
+    deploy_config = root / 'cloudflare/wrangler.deploy.json'
+    budget_source = deploy_config if deploy_config.is_file() else root / 'cloudflare/wrangler.json'
+    wrangler = _read_text(budget_source)
+    if runs_per_hour is None:
+        cron = CRON_PATTERN.search(workflow)
+        if not cron:
+            raise SafeFailure('Collector workflow has no scheduled batch')
+        runs_per_hour = cron_runs_per_hour(cron.group(1).strip())
+    if max_tasks_per_run is None:
+        batch = MAX_TASKS_PATTERN.search(workflow)
+        if not batch:
+            raise SafeFailure('Collector workflow has no bounded batch size')
+        max_tasks_per_run = int(batch.group(1))
+    if not 1 <= max_tasks_per_run <= 3:
+        raise SafeFailure('Scheduled batch size must stay within the bounded 1-3 tasks')
+    if revisit_hours is None:
+        interval = REVISIT_PATTERN.search(logic)
+        derived = all(token in logic.replace(' ','') for token in
+                      (REVISIT_DERIVATION,BACKOFF_DERIVATION,TTL_DERIVATION))
+        if not interval or not derived or 'REVISIT_MS' not in store or 'ERROR_BACKOFF_MS' not in store:
+            raise SafeFailure('Store must reschedule from the shared revisit interval constants')
+        revisit_hours = int(interval.group(1))
+    if revisit_hours < 1:
+        raise SafeFailure('Revisit interval must be at least one hour')
+    if claim_budget is None:
+        budget = CLAIM_BUDGET_PATTERN.search(wrangler)
+        if not budget:
+            raise SafeFailure('Deployment has no hourly claim budget')
+        claim_budget = int(budget.group(1))
+    if not 1 <= claim_budget <= 10:
+        raise SafeFailure('Deployed hourly claim budget must stay within 1-10 searches')
+    scheduled = runs_per_hour * max_tasks_per_run
+    capacity = min(scheduled, claim_budget)
+    demand = active_routes / revisit_hours
+    return {'active_routes':active_routes,'revisit_hours':revisit_hours,'runs_per_hour':runs_per_hour,
+        'max_tasks_per_run':max_tasks_per_run,'scheduled_claims_per_hour':scheduled,'claim_budget':claim_budget,
+        'budget_source':budget_source.name,
+        'capacity_per_hour':float(capacity),'demand_per_hour':demand,'headroom_per_hour':round(capacity-demand,6),
+        'sustainable':demand <= capacity,
+        'invariant':'active routes / revisit hours <= min(runs per hour * max tasks per run, hourly claim budget)'}
+
+def simulate_coverage(active_routes: int, revisit_hours: int, runs_per_hour: int, max_tasks_per_run: int,
+                      error_backoff_hours: int = 1, windows: int = 2, error_runs: Sequence[int] = ()) -> dict:
+    """Deterministic frozen-clock replay of the scheduled collector over the route matrix.
+
+    Mirrors the real claim order (due routes first) and the real failure semantics:
+    an ok/empty result reschedules a route one revisit interval later, an error
+    stops the rest of that batch and retries the route after the error backoff.
+    `error_runs` names absolute run numbers, counting every scheduled run of the
+    horizon from zero.
+    """
+    if not all(isinstance(value,int) and value > 0 for value in
+               (active_routes,runs_per_hour,max_tasks_per_run,windows)) or revisit_hours < 1 or error_backoff_hours < 1:
+        raise SafeFailure('Coverage simulation needs positive integer arguments')
+    errors = set(error_runs)
+    horizon = revisit_hours * windows
+    due = {route:0 for route in range(active_routes)}
+    served = {route:0 for route in due}
+    last = dict.fromkeys(due)
+    gaps = {route:[] for route in due}
+    attempts = error_count = 0
+    for hour in range(horizon + 1):
+        for index in range(runs_per_hour):
+            now = hour + index / runs_per_hour
+            batch = sorted((at, route) for route, at in due.items() if at <= now)[:max_tasks_per_run]
+            if not batch:
+                continue
+            batch = [route for _, route in batch]
+            attempts += 1
+            if hour * runs_per_hour + index in errors:
+                error_count += 1
+                due[batch[0]] = now + error_backoff_hours
+                continue  # An upstream failure ends this batch, exactly like run_batch.
+            for route in batch:
+                if served[route]:
+                    gaps[route].append(round(now - last[route], 6))
+                served[route] += 1
+                last[route] = now
+                due[route] = now + revisit_hours
+    observed = [gap for values in gaps.values() for gap in values]
+    delayed = sorted(route for route, values in gaps.items() if any(gap > revisit_hours for gap in values))
+    unserved = sorted(route for route in due if not served[route])
+    max_interval = max(observed) if observed else None
+    return {'active_routes':active_routes,'revisit_hours':revisit_hours,'runs_per_hour':runs_per_hour,
+        'max_tasks_per_run':max_tasks_per_run,'windows':windows,'horizon_hours':horizon,'batches':attempts,
+        'served':sum(served.values()),'errors':error_count,'unserved':unserved,
+        'routes_delayed':delayed,'max_interval_hours':max_interval,'degraded':error_count > 0,
+        'target_met':error_count == 0 and not unserved and not delayed and max_interval is not None
+            and max_interval <= revisit_hours}
+
 def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.sleep) -> dict:
     if type(max_tasks) is not int or not 1 <= max_tasks <= 3:
         raise SafeFailure('A batch must contain 1-3 tasks')
@@ -163,7 +321,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute',action='store_true')
     parser.add_argument('--max-tasks',type=int,choices=(1,2,3),default=3)
+    parser.add_argument('--check-capacity',action='store_true',
+        help='Report planned route coverage against planned collector capacity and exit')
     args = parser.parse_args()
+    if args.check_capacity:
+        checked = coverage_plan()
+        print(json.dumps(checked))
+        return 0 if checked['sustainable'] else 3
     if not args.execute:
         print(json.dumps({'mode':'dry-run','max_tasks':args.max_tasks,'network_calls':0}))
         return 0

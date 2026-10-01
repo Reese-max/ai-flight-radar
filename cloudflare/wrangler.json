@@ -15,7 +15,7 @@
   "vars": {
     "APP_ID": "reese-max/ai-flight-radar:cloudflare-v1",
     "COLLECTOR_ENABLED": "false",
-    "MAX_SEARCHES_PER_HOUR": "3"
+    "MAX_SEARCHES_PER_HOUR": "6"
   },
   "d1_databases": [
     {

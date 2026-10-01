@@ -33,6 +33,7 @@ jobs:
           node --test cloudflare/tests/*.test.mjs
           python -m unittest discover -s cloudflare/tests -p 'test_*.py' -v
           python cloudflare/scripts/collector.py
+          python cloudflare/scripts/collector.py --check-capacity
       - name: Install pinned Wrangler without any deployment credentials
         working-directory: cloudflare
         run: npm install

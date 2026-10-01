@@ -11,7 +11,12 @@ export function money(value) {
 }
 export function isStale(q, now = Date.now()) {
   const timestamp = Date.parse(q.searched_at);
-  return q.expired === true || !Number.isFinite(timestamp) || now - timestamp > 6*3600000 || timestamp-now > 300000;
+  const future = !Number.isFinite(timestamp) || timestamp-now > 300000;
+  // Each deployment publishes its own freshness window: the Docker app uses
+  // DEAL_MAX_AGE_HOURS, the Cloudflare Worker its collector revisit interval.
+  // The server verdict wins; the local window only guards a payload without one.
+  if (typeof q.expired === 'boolean') return future || q.expired;
+  return future || now - timestamp > 6*3600000;
 }
 export function relativeTime(iso, now = Date.now()) {
   const stamp = Date.parse(iso);
