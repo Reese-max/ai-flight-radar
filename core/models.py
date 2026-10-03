@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Optional, List
+from pydantic import NaiveDatetime
 from sqlmodel import SQLModel, Field, UniqueConstraint
 
 class Route(SQLModel, table=True):
@@ -10,7 +11,7 @@ class Route(SQLModel, table=True):
     country: str = Field(default="日本")
     priority: int = Field(default=5)
     active: bool = Field(default=True)
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: NaiveDatetime = Field(default_factory=datetime.utcnow)
 
     __table_args__ = (
         UniqueConstraint("origin", "destination", name="uq_origin_destination"),
@@ -36,7 +37,7 @@ class FlightSearchRecord(SQLModel, table=True):
     arrival_time: Optional[str] = None
     duration_mins: Optional[int] = None
     source: str = Field(default="google_flights")
-    searched_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    searched_at: NaiveDatetime = Field(default_factory=datetime.utcnow, index=True)
 
 class RouteStats(SQLModel, table=True):
     __tablename__ = "route_stats"
@@ -50,7 +51,7 @@ class RouteStats(SQLModel, table=True):
     avg_90d: Optional[float] = None
     min_historical: Optional[int] = None
     max_historical: Optional[int] = None
-    last_updated: datetime = Field(default_factory=datetime.utcnow)
+    last_updated: NaiveDatetime = Field(default_factory=datetime.utcnow)
 
     __table_args__ = (
         UniqueConstraint("origin", "destination", "duration_days", name="uq_route_duration_stats"),
@@ -74,9 +75,9 @@ class Deal(SQLModel, table=True):
     reasons: str = Field(default="[]") # JSON string array
     is_direct: bool = Field(default=True)
     status: str = Field(default="active", index=True) # active, expired
-    created_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    created_at: NaiveDatetime = Field(default_factory=datetime.utcnow, index=True)
     notified: bool = Field(default=False)
-    notified_at: Optional[datetime] = None
+    notified_at: Optional[NaiveDatetime] = None
 
 class SearchTask(SQLModel, table=True):
     __tablename__ = "search_tasks"
@@ -89,8 +90,8 @@ class SearchTask(SQLModel, table=True):
     tier: int = Field(default=1) # 1: normal, 2: drop, 3: target, 4: extreme
     last_price: Optional[int] = None
     last_deal_score: Optional[int] = None
-    last_searched_at: Optional[datetime] = None
-    next_run_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    last_searched_at: Optional[NaiveDatetime] = None
+    next_run_at: NaiveDatetime = Field(default_factory=datetime.utcnow, index=True)
     priority: int = Field(default=5)
 
     __table_args__ = (

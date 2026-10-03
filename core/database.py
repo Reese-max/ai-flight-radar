@@ -1,5 +1,5 @@
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime
 from sqlmodel import SQLModel, create_engine, Session, select
 from sqlalchemy import event, update
 from sqlalchemy.dialects.sqlite import insert
@@ -27,7 +27,7 @@ def init_db():
     # One additive migration. Preserve raw records and sent-alert history.
     with Session(engine) as session:
         claimed = session.execute(insert(RadarMigration).values(
-            name="search-snapshots-v1", applied_at=datetime.now(timezone.utc)
+            name="search-snapshots-v1", applied_at=datetime.utcnow()
         ).on_conflict_do_nothing(index_elements=["name"]))
         if claimed.rowcount == 1:
             session.execute(update(Deal).where(Deal.status == "active").values(status="expired"))
@@ -47,6 +47,6 @@ def get_session():
 def seed_default_routes():
     with Session(engine) as session:
         for route in DEFAULT_MONITORED_ROUTES:
-            session.execute(insert(Route).values(**route, active=True, country="日本", created_at=datetime.now(timezone.utc)).on_conflict_do_nothing(
+            session.execute(insert(Route).values(**route, active=True, country="日本", created_at=datetime.utcnow()).on_conflict_do_nothing(
                 index_elements=["origin", "destination"]))
         session.commit()
