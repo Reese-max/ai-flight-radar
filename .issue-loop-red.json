@@ -1,0 +1,7 @@
+{
+  "repo": "Reese-max/ai-flight-radar",
+  "issue": 8,
+  "base_sha": "6228138337f950cb6399088c4f814f27a518e29e",
+  "command": "python -m pytest tests/test_fli_flexible.py -q",
+  "exit": 1
+}

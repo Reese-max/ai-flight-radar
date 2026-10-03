@@ -60,13 +60,28 @@ class FliCustomProvider(BaseFlightProvider):
             currency=self.currency, language=self.language, country=self.country)
 
     def search(self, origin: str, destination: str, depart_date: str,
-               return_date: Optional[str] = None, max_stops: int = 0
+               return_date: Optional[str] = None, max_stops: int = 0,
+               cabin: str = "ECONOMY", adults: int = 1,
+               airlines: Optional[List[str]] = None
                ) -> List[StandardFlightOffer]:
         try:
             (Airport, FlightSearchFilters, FlightSegment, MaxStops,
              PassengerInfo, SeatType, TripType, _search) = _load_engine()
+            from fli.models import Airline
             stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER}.get(
                 max_stops, MaxStops.TWO_OR_FEWER_STOPS)
+            if not isinstance(adults, int) or adults < 1:
+                raise ValueError("adults must be a positive integer")
+            try:
+                seat = SeatType[cabin.strip().upper()]
+            except KeyError:
+                raise ValueError(f"Unknown cabin: {cabin!r}")
+            mapped_airlines = None
+            if airlines is not None:
+                try:
+                    mapped_airlines = [Airline[code.strip().upper()] for code in airlines]
+                except KeyError:
+                    raise ValueError("Unknown airline code")
             segments = [FlightSegment(departure_airport=[[Airport[origin], 0]],
                                       arrival_airport=[[Airport[destination], 0]],
                                       travel_date=depart_date)]
@@ -76,8 +91,9 @@ class FliCustomProvider(BaseFlightProvider):
                                               travel_date=return_date))
             filters = FlightSearchFilters(
                 trip_type=TripType.ROUND_TRIP if return_date else TripType.ONE_WAY,
-                passenger_info=PassengerInfo(adults=1),
-                flight_segments=segments, stops=stops, seat_type=SeatType.ECONOMY)
+                passenger_info=PassengerInfo(adults=adults),
+                flight_segments=segments, stops=stops, seat_type=seat,
+                airlines=mapped_airlines)
         except (KeyError, ValueError, TypeError) as exc:
             raise FliProviderError(f"Cannot build search filters: {type(exc).__name__}") from exc
 
