@@ -52,10 +52,11 @@ class CollectorTests(unittest.TestCase):
     def test_single_search_helper_stops_before_provider_when_calibration_blocks(self):
         import collector
         import search_once
+        import providers.selector as provider_selector
         out=io.StringIO()
         with patch.object(sys,'stdin',io.StringIO(json.dumps(task()))),patch.object(sys,'stdout',out),\
             patch('collector.require_calibration_admission',side_effect=SafeFailure('blocked')),\
-            patch('providers.selector.get_provider',side_effect=AssertionError('provider must not run')):
+            patch.object(provider_selector,'get_provider',side_effect=AssertionError('provider must not run')):
             search_once.main()
         self.assertEqual(json.loads(out.getvalue()),{'outcome':'error'})
     def test_https_only(self):
