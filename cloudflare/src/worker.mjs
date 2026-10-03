@@ -32,7 +32,7 @@ export function createHandler(clock=Date.now){
         const data=await bodyJSON(request);
         if(p==='/api/ui/parse'){record(data,['query']);return json(parseIntent(data.query,now));}
         if(p==='/api/scan/trigger')return json(await store.enqueue(env,data,now),202);
-        if(p==='/api/admin/tasks')return json(await store.seed(env.DB,data,now),202);
+        if(p==='/api/admin/tasks')return json(await store.seed(env,data,now),202);
         if(p==='/api/collector/claim')return json(await store.claim(env,data,now));
         if(p==='/api/collector/result')return json(await store.complete(env,data,now));
         if(p==='/api/collector/report')return json(await store.report(env,data,now));

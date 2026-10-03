@@ -15,7 +15,8 @@
   "vars": {
     "APP_ID": "reese-max/ai-flight-radar:cloudflare-v1",
     "COLLECTOR_ENABLED": "false",
-    "MAX_SEARCHES_PER_HOUR": "3"
+    "MAX_SEARCHES_PER_HOUR": "3",
+    "CALIBRATION_ADMISSION": "{\"schema_version\":1,\"protocol_version\":\"1.0\",\"provider\":\"fast_flights\",\"provider_version\":\"3.1.0\",\"decision\":\"BLOCK\",\"measured_at\":null,\"expires_at\":null,\"allowed_routes\":[],\"route_metrics\":{},\"approvals\":{\"owner_authorized\":false,\"terms_allowed\":false,\"budget_approved\":false},\"blockers\":[\"owner_authorized_live_calibration_not_completed\"]}"
   },
   "d1_databases": [
     {

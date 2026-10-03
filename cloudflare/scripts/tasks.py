@@ -7,9 +7,13 @@ from pathlib import Path
 import sys
 import time
 from zoneinfo import ZoneInfo
-from collector import Client,SafeFailure,ORIGINS,DESTINATIONS
+from collector import Client,SafeFailure,require_calibration_admission
 
-ROUTES = [(o,d) for o in sorted(ORIGINS) for d in sorted(DESTINATIONS)]
+ROUTES = [
+    ('TPE','NRT'),('TPE','KIX'),('TPE','FUK'),('TPE','OKA'),('TPE','CTS'),('TPE','NGO'),
+    ('TSA','HND'),('KHH','NRT'),('KHH','KIX'),('KHH','FUK'),('KHH','OKA'),('TPE','KMJ'),
+    ('TPE','KOJ'),('TPE','SDJ'),('TPE','OKJ'),('TPE','TAK'),
+]
 
 def plan(today,offset=30,nights=4):
     if type(offset) is not int or not 1 <= offset <= 300 or type(nights) is not int or not 1 <= nights <= 30:
@@ -41,6 +45,7 @@ def main():
         return
     if not args.file:
         raise SafeFailure('Review a saved --file before executing; implicit plans are never submitted')
+    require_calibration_admission()
     client = Client(os.getenv('RADAR_URL',''),os.getenv('RADAR_ADMIN_KEY',''),role='admin')
     client.verify()
     tasks = data['tasks']

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import site
+import socket
 import subprocess
 import sys
 import time
@@ -23,9 +24,52 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 ORIGINS = {'TPE', 'TSA', 'KHH', 'RMQ'}
 DESTINATIONS = {'NRT','HND','KIX','FUK','KMJ','KOJ','OKA','NGO','CTS','SDJ','OKJ','TAK'}
+ERROR_TYPES = frozenset({'RATE_LIMITED','UPSTREAM_CHANGED','PARSE_FAILED','TIMEOUT','BLOCKED','SOURCE_UNAVAILABLE','UNKNOWN'})
 
 class SafeFailure(RuntimeError):
     """A deliberately sanitized message suitable for CI logs."""
+
+class AdmissionBlocked(SafeFailure):
+    """The calibration receipt does not admit a provider query."""
+
+class ClassifiedFailure(SafeFailure):
+    def __init__(self, error_type: str):
+        if error_type not in ERROR_TYPES:
+            error_type = 'UNKNOWN'
+        self.error_type = error_type
+        super().__init__('Collection failed')
+
+def classify_failure(exc: BaseException) -> str:
+    """Map exceptions to a safe enum without inspecting their messages."""
+    declared = getattr(exc, 'error_type', None)
+    if isinstance(declared,str) and declared in ERROR_TYPES:
+        return declared
+    if isinstance(exc, AdmissionBlocked):
+        return 'BLOCKED'
+    if isinstance(exc, (TimeoutError, socket.timeout, subprocess.TimeoutExpired)):
+        return 'TIMEOUT'
+    if isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, (TimeoutError, socket.timeout)):
+        return 'TIMEOUT'
+    status = next((getattr(exc, name, None) for name in ('status_code','status','code')
+                   if type(getattr(exc, name, None)) is int), None)
+    if status == 429:
+        return 'RATE_LIMITED'
+    if status in (401,403):
+        return 'BLOCKED'
+    if status in (404,410):
+        return 'UPSTREAM_CHANGED'
+    if type(status) is int and 500 <= status <= 599:
+        return 'SOURCE_UNAVAILABLE'
+    if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError, KeyError, IndexError, AttributeError)):
+        return 'PARSE_FAILED'
+    if isinstance(exc, (OSError, urllib.error.URLError, ConnectionError)):
+        return 'SOURCE_UNAVAILABLE'
+    if isinstance(exc, SafeFailure):
+        return 'PARSE_FAILED'
+    return 'UNKNOWN'
+
+def error_result(error_type: str = 'UNKNOWN') -> dict:
+    return {'outcome':'error','error_type':error_type if isinstance(error_type,str) and error_type in ERROR_TYPES else 'UNKNOWN'}
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -117,20 +161,26 @@ def search_subprocess(task: dict) -> dict:
     try:
         result = subprocess.run([sys.executable,str(Path(__file__).with_name('search_once.py'))],
             input=json.dumps(task),text=True,capture_output=True,timeout=90,env=child_env,cwd=ROOT,check=False)
-        if result.returncode != 0 or len(result.stdout) > 16384:
-            return {'outcome':'error'}
+        if result.returncode != 0:
+            return error_result('SOURCE_UNAVAILABLE')
+        if len(result.stdout) > 16384:
+            return error_result('PARSE_FAILED')
         payload = json.loads(result.stdout)
         if not isinstance(payload,dict) or payload.get('outcome') not in {'ok','empty','error'}:
-            return {'outcome':'error'}
+            return error_result('PARSE_FAILED')
+        if payload['outcome']=='error':
+            return error_result(payload.get('error_type','UNKNOWN'))
+        if 'error_type' in payload:
+            return error_result('PARSE_FAILED')
         return payload
-    except (subprocess.TimeoutExpired,OSError,ValueError):
-        return {'outcome':'error'}
+    except (subprocess.TimeoutExpired,OSError,ValueError) as exc:
+        return error_result(classify_failure(exc))
 
 def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.sleep) -> dict:
     if type(max_tasks) is not int or not 1 <= max_tasks <= 3:
         raise SafeFailure('A batch must contain 1-3 tasks')
     client.verify()
-    summary = {'run_id':str(uuid.uuid4()),'attempted':0,'observed':0,'errors':0}
+    summary = {'run_id':str(uuid.uuid4()),'attempted':0,'observed':0,'errors':0,'error_types':{}}
     for i in range(max_tasks):
         response = client.call('/api/collector/claim',{'run_id':summary['run_id']})
         if response.get('task') is None:
@@ -139,12 +189,21 @@ def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.s
         summary['attempted'] += 1
         try:
             payload = search(task)
-        except Exception:
-            payload = {'outcome':'error'}
+        except Exception as exc:
+            payload = error_result(classify_failure(exc))
         if not isinstance(payload,dict) or payload.get('outcome') not in {'ok','empty','error'}:
-            payload = {'outcome':'error'}
-        # Client code cannot let a provider override the task or credential context.
-        payload = {k:v for k,v in payload.items() if k in {'outcome','price_twd','searched_at','airline','offer_count'}}
+            payload = error_result('PARSE_FAILED')
+        # Keep fields appropriate to the outcome; never forward exception or provider extras.
+        if payload['outcome']=='error':
+            payload=error_result(payload.get('error_type','UNKNOWN'))
+            summary['error_types'][payload['error_type']]=summary['error_types'].get(payload['error_type'],0)+1
+        elif payload['outcome']=='empty':
+            payload={'outcome':'empty'}
+        elif 'error_type' in payload:
+            payload=error_result('PARSE_FAILED')
+            summary['error_types']['PARSE_FAILED']=summary['error_types'].get('PARSE_FAILED',0)+1
+        else:
+            payload = {k:v for k,v in payload.items() if k in {'outcome','price_twd','searched_at','airline','offer_count'}}
         payload.update(task_id=task['id'],lease_token=task['lease_token'])
         accepted = client.call('/api/collector/result',payload)
         if accepted.get('status') != 'accepted':
@@ -159,6 +218,16 @@ def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.s
     client.call('/api/collector/report',summary)
     return summary
 
+def require_calibration_admission() -> None:
+    gate = ROOT / 'cloudflare' / 'scripts' / 'calibration-gate.mjs'
+    try:
+        result = subprocess.run(['node',str(gate),'--require-admitted'],capture_output=True,
+            text=True,timeout=10,check=False,cwd=ROOT)
+    except (OSError,subprocess.TimeoutExpired):
+        raise ClassifiedFailure('SOURCE_UNAVAILABLE') from None
+    if result.returncode != 0:
+        raise AdmissionBlocked('Current calibration decision does not admit collection')
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute',action='store_true')
@@ -169,6 +238,7 @@ def main() -> int:
         return 0
     if os.getenv('RADAR_COLLECTOR_ENABLED') != 'true':
         raise SafeFailure('RADAR_COLLECTOR_ENABLED must explicitly be true')
+    require_calibration_admission()
     client = Client(os.getenv('RADAR_URL',''),os.getenv('RADAR_COLLECTOR_KEY',''))
     result = run_batch(client,max_tasks=args.max_tasks)
     print(json.dumps(result))
