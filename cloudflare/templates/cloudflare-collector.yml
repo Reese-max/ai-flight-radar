@@ -28,9 +28,14 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - name: Require a current BUILD or NARROW calibration receipt
+        run: node cloudflare/scripts/calibration-gate.mjs --require-admitted
       - name: Install existing provider dependencies
         run: python -m pip install -r requirements.txt
       - name: Run a bounded batch

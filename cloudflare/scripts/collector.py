@@ -159,6 +159,16 @@ def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.s
     client.call('/api/collector/report',summary)
     return summary
 
+def require_calibration_admission() -> None:
+    gate = ROOT / 'cloudflare' / 'scripts' / 'calibration-gate.mjs'
+    try:
+        result = subprocess.run(['node',str(gate),'--require-admitted'],capture_output=True,
+            text=True,timeout=10,check=False,cwd=ROOT)
+    except (OSError,subprocess.TimeoutExpired):
+        raise SafeFailure('Current calibration gate could not be checked; collection refused') from None
+    if result.returncode != 0:
+        raise SafeFailure('Current calibration decision does not admit collection')
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--execute',action='store_true')
@@ -169,6 +179,7 @@ def main() -> int:
         return 0
     if os.getenv('RADAR_COLLECTOR_ENABLED') != 'true':
         raise SafeFailure('RADAR_COLLECTOR_ENABLED must explicitly be true')
+    require_calibration_admission()
     client = Client(os.getenv('RADAR_URL',''),os.getenv('RADAR_COLLECTOR_KEY',''))
     result = run_batch(client,max_tasks=args.max_tasks)
     print(json.dumps(result))

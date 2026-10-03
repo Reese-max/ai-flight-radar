@@ -3,12 +3,26 @@ import assert from 'node:assert/strict';
 import {LocalD1} from '../scripts/sqlite-d1.mjs';
 import {createHandler} from '../src/worker.mjs';
 import {APP_ID} from '../src/catalog.mjs';
+import {ROUTE_KEYS} from '../src/calibration.mjs';
 import {DAY,taskSpec} from '../src/logic.mjs';
 const ADMIN='a'.repeat(48),COLLECTOR='c'.repeat(48),UUID=()=>crypto.randomUUID();
+function admission(decision='BUILD',allowed=ROUTE_KEYS){
+  const metric={attempted:3,successful:3,parse_complete:3,parse_sample_count:3,date_windows:[30,90,180],quote_age_sample_count:3,
+    currency_match_count:3,passenger_match_count:3,cabin_match_count:3,directness_match_count:3,safe_link_resolved_count:3,
+    search_success_rate:1,parse_completeness_rate:1,
+    quote_age_p95_seconds:90,currency_consistency_rate:1,passenger_consistency_rate:1,cabin_consistency_rate:1,
+    directness_consistency_rate:1,safe_link_resolution_rate:1,handoff_comparison_count:3,price_discrepancy_p95_percent:1};
+  const blocked=decision==='BLOCK';
+  return JSON.stringify({schema_version:1,protocol_version:'1.0',provider:'fast_flights',provider_version:'3.1.0',decision,
+    measured_at:blocked?null:'2026-09-11T05:00:00.000Z',expires_at:blocked?null:'2026-09-20T05:00:00.000Z',
+    allowed_routes:blocked?[]:allowed,route_metrics:blocked?{}:Object.fromEntries(allowed.map(route=>[route,metric])),
+    blockers:blocked?['owner_stop']:[],approvals:{owner_authorized:!blocked,terms_allowed:!blocked,budget_approved:!blocked}});
+}
 function rig(t){
   const db=new LocalD1();t.after(()=>db.close());
   const clock={now:Date.parse('2026-09-11T06:00:00Z')};
   const env={DB:db,APP_ID,ADMIN_KEY:ADMIN,COLLECTOR_KEY:COLLECTOR,COLLECTOR_ENABLED:'true',MAX_SEARCHES_PER_HOUR:'3',
+    CALIBRATION_ADMISSION:admission(),
     ASSETS:{fetch:async()=>new Response('static asset fixture')}};
   const handler=createHandler(()=>clock.now);
   async function request(path,{method='GET',role,data,raw,headers={}}={}){
@@ -41,7 +55,7 @@ test('wrong database identity is rejected',async t=>{const r=rig(t);r.db.sqlite.
 test('missing binding is a clear unavailable state not empty results',async t=>{const r=rig(t);delete r.env.DB;const v=await r.request('/api/ui/quotes');assert.equal(v.status,503);assert(!('quotes'in v.body));});
 test('static assets bypass API database checks',async t=>{const r=rig(t);delete r.env.DB;assert.equal((await r.request('/')).body,'static asset fixture');});
 test('new database returns no fake fares',async t=>{const r=rig(t);const v=await r.request('/api/ui/quotes');assert.equal(v.status,200);assert.deepEqual(v.body.quotes,[]);assert.equal(v.body.demo,false);});
-test('config exposes flags but no admin or collector key',async t=>{const r=rig(t);const v=await r.request('/api/ui/config');assert.equal(v.body.watchlist_scope,'browser_only');assert.equal(v.body.notifications.ntfy,false);assert.equal(v.body.worker.status,'not_started');assert(!JSON.stringify(v.body).includes(COLLECTOR));});
+test('config exposes source-health admission without admin or collector key',async t=>{const r=rig(t);const v=await r.request('/api/ui/config');assert.equal(v.body.watchlist_scope,'browser_only');assert.equal(v.body.notifications.ntfy,false);assert.equal(v.body.worker.status,'not_started');assert.equal(v.body.worker.source_health.state,'unavailable');assert.equal(v.body.worker.source_health.reason,'batch_not_started');assert.equal(v.body.worker.calibration.decision,'BUILD');assert(!JSON.stringify(v.body).includes(COLLECTOR));});
 for(const path of ['/api/scan/trigger','/api/admin/tasks','/api/collector/claim','/api/collector/result','/api/collector/report']){
   test(`unauthorized ${path} cannot mutate state`,async t=>{const r=rig(t);const v=await r.request(path,{data:{}});assert.equal(v.status,401);assert.equal(r.db.queries,0);});
 }
@@ -58,8 +72,37 @@ test('unknown JSON fields are rejected',async t=>{const r=rig(t);assert.equal((a
 test('body size limit also applies without Content-Length',async t=>{const r=rig(t);assert.equal((await r.request('/api/ui/parse',{data:{query:'x'.repeat(17000)}})).status,413);});
 test('read routes do not enqueue tasks',async t=>{const r=rig(t);await r.request('/api/ui/config');await r.request('/api/ui/quotes');assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_tasks').get().n,0);});
 test('manual enqueue is deduplicated and rate limited',async t=>{const r=rig(t);const data={origin:'TPE',destination:'FUK'};assert.equal((await r.request('/api/scan/trigger',{role:'admin',data})).status,202);assert.equal((await r.request('/api/scan/trigger',{role:'admin',data})).status,429);r.clock.now+=61000;assert.equal((await r.request('/api/scan/trigger',{role:'admin',data})).status,202);assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_tasks').get().n,1);});
+test('manual queue and bulk seed reject routes outside the configured calibration matrix',async t=>{
+  const r=rig(t);assert.equal((await r.request('/api/scan/trigger',{role:'admin',data:{origin:'TPE',destination:'HND'}})).status,422);
+  assert.equal((await r.request('/api/admin/tasks',{role:'admin',data:{tasks:[{origin:'TPE',destination:'HND',depart_date:'2026-11-12',return_date:'2026-11-16'}]}})).status,422);
+  assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_tasks').get().n,0);
+});
+test('bulk task seeding is blocked without current calibration admission',async t=>{
+  const r=rig(t);r.env.CALIBRATION_ADMISSION=admission('BLOCK');
+  const v=await r.request('/api/admin/tasks',{role:'admin',data:{tasks:[{origin:'TPE',destination:'FUK',depart_date:'2026-11-12',return_date:'2026-11-16'}]}});
+  assert.equal(v.status,503);assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_tasks').get().n,0);
+});
 test('manual enqueue does not claim a task or execute a provider',async t=>{const r=rig(t);r.env.COLLECTOR_ENABLED='false';const v=await r.request('/api/scan/trigger',{role:'admin',data:{origin:'TPE',destination:'FUK'}});assert.equal(v.body.collector_enabled,false);assert.equal(r.db.sqlite.prepare('SELECT lease_owner FROM cf_radar_tasks').get().lease_owner,null);});
-test('collector is disabled by default and cannot claim',async t=>{const r=rig(t);delete r.env.COLLECTOR_ENABLED;await r.seed();assert.equal((await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}})).status,503);});
+test('manual queue API reports effectively disabled when calibration is BLOCK',async t=>{
+  const r=rig(t);r.env.CALIBRATION_ADMISSION=admission('BLOCK');
+  const v=await r.request('/api/scan/trigger',{role:'admin',data:{origin:'TPE',destination:'FUK'}});
+  assert.equal(v.status,202);assert.equal(v.body.collector_enabled,false);
+});
+test('collector is disabled by default and cannot claim',async t=>{const r=rig(t);delete r.env.COLLECTOR_ENABLED;r.db.sqlite.prepare('INSERT INTO cf_radar_tasks(id,query_key,origin,destination,depart_date,return_date) VALUES(?,?,?,?,?,?)').run('disabled-task','e'.repeat(64),'TPE','FUK','2026-11-12','2026-11-16');assert.equal((await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}})).status,503);});
+test('collector enable flag cannot bypass a BLOCK or expired calibration receipt',async t=>{
+  const r=rig(t);await r.seed();r.env.CALIBRATION_ADMISSION=admission('BLOCK');
+  assert.equal((await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}})).status,503);
+  r.env.CALIBRATION_ADMISSION=admission('BUILD');r.clock.now=Date.parse('2026-09-21T06:00:00Z');
+  assert.equal((await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}})).status,503);
+});
+test('NARROW calibration leases only an approved route',async t=>{
+  const r=rig(t);r.env.CALIBRATION_ADMISSION=admission('NARROW',['TPE/FUK']);
+  await r.seed([{origin:'TPE',destination:'FUK',depart_date:'2026-11-12',return_date:'2026-11-16'}]);
+  r.db.sqlite.prepare('INSERT INTO cf_radar_tasks(id,query_key,origin,destination,depart_date,return_date) VALUES(?,?,?,?,?,?)')
+    .run('outside-scope','f'.repeat(64),'TPE','KIX','2026-11-12','2026-11-16');
+  const task=await r.claim();assert.equal(task.origin,'TPE');assert.equal(task.destination,'FUK');
+  assert.equal(r.db.sqlite.prepare("SELECT lease_owner FROM cf_radar_tasks WHERE destination='KIX'").get().lease_owner,null);
+});
 test('two claim requests cannot own the same unexpired task',async t=>{const r=rig(t);await r.seed();const first=await r.claim(),second=await r.claim();assert(first);assert.equal(second,null);});
 test('expired lease may be reclaimed with a new token',async t=>{const r=rig(t);await r.seed();const a=await r.claim();r.clock.now+=901000;const b=await r.claim();assert.equal(a.id,b.id);assert.notEqual(a.lease_token,b.lease_token);});
 test('hourly claim budget cannot be bypassed by another run ID',async t=>{const r=rig(t);await r.seed();await r.claim();await r.claim();await r.claim();const v=await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}});assert.equal(v.status,429);assert(Number(v.headers.get('Retry-After'))>0);});
@@ -67,6 +110,13 @@ test('the next hour resets the claim budget',async t=>{const r=rig(t);await r.se
 test('success stores one minimum-price observation and matching airline',async t=>{const r=rig(t);await r.seed();const task=await r.claim();const v=await r.complete(task);assert.equal(v.status,200,JSON.stringify(v.body));const q=(await r.request('/api/ui/quotes')).body.quotes;assert.equal(q.length,1);assert.equal(q[0].price_twd,5980);assert.equal(q[0].airline,'Synthetic test airline');assert.equal(q[0].baseline_twd,null);});
 test('identical result replay does not duplicate a snapshot or count',async t=>{const r=rig(t);await r.seed();const task=await r.claim();await r.complete(task);const v=await r.complete(task);assert.equal(v.body.replayed,true);assert.equal((await r.request('/api/ui/config')).body.search_snapshots,1);});
 test('different result with the same lease is rejected',async t=>{const r=rig(t);await r.seed();const task=await r.claim();await r.complete(task);assert.equal((await r.complete(task,{price_twd:1})).status,409);});
+test('receipt expiry blocks result acceptance and batch reporting for an active lease',async t=>{
+  const r=rig(t);await r.seed();const task=await r.claim();
+  r.env.CALIBRATION_ADMISSION=admission('BLOCK');
+  assert.equal((await r.complete(task)).status,503);
+  assert.equal((await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:1,observed:0,errors:0}})).status,503);
+  assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_snapshots').get().n,0);
+});
 test('lost owner cannot submit a fare',async t=>{const r=rig(t);await r.seed();const task=await r.claim();r.db.sqlite.prepare('UPDATE cf_radar_tasks SET lease_owner=?').run(UUID());assert.equal((await r.complete(task)).status,409);});
 test('lease reassign between initial check and transaction prevents stale writes',async t=>{const r=rig(t);await r.seed();const task=await r.claim();r.db.beforeBatch=async()=>{r.db.sqlite.prepare('UPDATE cf_radar_tasks SET lease_owner=?').run(UUID());r.db.beforeBatch=null;};assert.equal((await r.complete(task)).status,409);assert.equal((await r.request('/api/ui/config')).body.search_snapshots,0);});
 for(const bad of [0,-1,NaN,Infinity,true,12.5,'6000',1000001]){
@@ -90,10 +140,16 @@ for(const query of ['origin=XXX','origin=TPE%27%20OR%201%3D1','start_date=2026-0
 }
 test('source URL is generated by server, with fixed HTTPS origin',async t=>{const r=rig(t);await r.seed();await r.complete(await r.claim());const q=(await r.request('/api/ui/quotes')).body.quotes[0];assert.equal(new URL(q.source_url).origin,'https://www.google.com');assert.equal(q.baggage_verified,false);});
 test('seed batch rejects duplicate tasks',async t=>{const r=rig(t);const v={origin:'TPE',destination:'FUK',depart_date:'2026-11-12',return_date:'2026-11-16'};assert.equal((await r.request('/api/admin/tasks',{role:'admin',data:{tasks:[v,v]}})).status,422);});
-test('a task capacity failure rolls back all tasks in the seed batch',async t=>{const r=rig(t);for(let i=0;i<127;i++)r.db.sqlite.prepare('INSERT INTO cf_radar_tasks(id,query_key,origin,destination,depart_date,return_date) VALUES(?,?,?,?,?,?)').run(String(i),String(i),'TPE','FUK','2026-11-12','2026-11-16');const v=await r.request('/api/admin/tasks',{role:'admin',data:{tasks:[{origin:'TPE',destination:'KIX',depart_date:'2026-11-12',return_date:'2026-11-16'},{origin:'TPE',destination:'CTS',depart_date:'2026-11-12',return_date:'2026-11-16'}]}});assert.equal(v.status,503);assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_tasks').get().n,127);});
+test('a task capacity failure rolls back all tasks in the seed batch',async t=>{const r=rig(t);for(let i=0;i<127;i++)r.db.sqlite.prepare('INSERT INTO cf_radar_tasks(id,query_key,origin,destination,depart_date,return_date) VALUES(?,?,?,?,?,?)').run(String(i),String(i),'TPE','FUK','2026-11-12','2026-11-16');const v=await r.request('/api/admin/tasks',{role:'admin',data:{tasks:[{origin:'TPE',destination:'KIX',depart_date:'2026-11-12',return_date:'2026-11-16'},{origin:'KHH',destination:'KIX',depart_date:'2026-11-12',return_date:'2026-11-16'}]}});assert.equal(v.status,503);assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_tasks').get().n,127);});
 test('snapshot cap rolls back receipt and leaves task retryable',async t=>{const r=rig(t);await r.seed();const task=await r.claim();r.db.sqlite.exec("UPDATE cf_radar_meta SET value='20000' WHERE key='snapshot_count'");assert.equal((await r.complete(task)).status,503);assert.equal(r.db.sqlite.prepare('SELECT COUNT(*) n FROM cf_radar_receipts').get().n,0);assert.equal(r.db.sqlite.prepare('SELECT lease_owner FROM cf_radar_tasks').get().lease_owner,task.lease_token);});
-test('batch with no observations is not advertised as successful ticket collection',async t=>{const r=rig(t);await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:0,observed:0,errors:0}});assert.equal((await r.request('/api/ui/config')).body.worker.status,'batch_empty');});
-test('batch status expires without pretending to be a continuous process',async t=>{const r=rig(t);await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:1,observed:1,errors:0}});r.clock.now+=4*3600000;assert.equal((await r.request('/api/ui/config')).body.worker.status,'stale');});
+test('batch with no observations is unavailable, not successful ticket collection',async t=>{const r=rig(t);await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:0,observed:0,errors:0}});const c=(await r.request('/api/ui/config')).body.worker;assert.equal(c.status,'batch_empty');assert.equal(c.source_health.state,'unavailable');assert.equal(c.source_health.reason,'no_successful_observation');});
+test('source health distinguishes available from partial batches',async t=>{
+  const r=rig(t);await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:1,observed:1,errors:0}});
+  assert.equal((await r.request('/api/ui/config')).body.worker.source_health.state,'available');
+  r.clock.now+=61000;await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:2,observed:1,errors:1}});
+  assert.equal((await r.request('/api/ui/config')).body.worker.source_health.state,'partial');
+});
+test('batch status expires without pretending to be a continuous process',async t=>{const r=rig(t);await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:1,observed:1,errors:0}});r.clock.now+=4*3600000;const c=(await r.request('/api/ui/config')).body.worker;assert.equal(c.status,'stale');assert.equal(c.source_health.state,'stale');});
 test('public quote list uses two bounded queries, no history N+1',async t=>{const r=rig(t);const [task]=await r.seed();r.snapshot(task,8000,r.clock.now);r.db.queries=0;await r.request('/api/ui/quotes');assert.equal(r.db.queries,2);});
 
 test('schema version mismatch is not advertised as a healthy version one database',async t=>{

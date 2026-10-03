@@ -10,7 +10,9 @@
 |---|---|---|
 | `Cloudflare Workers checks` | 離線測試、實際 UI 建置、Wrangler bundle、local D1 migration、workerd HTTP 檢查 | 不發布，不呼叫航空來源 |
 | `Deploy Cloudflare Workers` | 手動確認目標、檢查設定、驗證指定 D1 名稱、遠端 migration、發布 Worker、設定應用秘密、HTTP 驗收 | 只有 main 的手動執行且確認 `ai-flight-radar-cf` 才發布 |
-| `cloudflare/templates/cloudflare-collector.yml` | 最多三個查價任務的範本 | 尚未啟用，沒有運作中的排程 |
+| `.github/workflows/collector.yml` | 最多三個查價任務的 scheduled/manual collector | 需要 collector flag、現行校準 receipt 與 Worker admission 同時通過 |
+| `.github/workflows/seed.yml` | 每月建立校準範圍內的待查任務 | 需要 collector admission；不會直接查價 |
+| `cloudflare/templates/cloudflare-collector.yml` | collector workflow 的停用範本 | 不會單獨執行 |
 
 檢查流程的 prerequisites job 只報告缺少或格式不合的**設定名稱**，不輸出憑證內容，也不向 Cloudflare 送請求。`ready=true` 只代表設定齊全，不代表帳號授權已通過。
 
@@ -27,12 +29,18 @@
 | `CF_RADAR_DATABASE_ID` | Variable 或 Secret | 專用 `ai-flight-radar-cf` 的真實 D1 UUID |
 | `CF_RADAR_ADMIN_KEY` | Secret | 應用管理員金鑰，32–256 字元，不是 Cloudflare Token |
 | `CF_RADAR_COLLECTOR_KEY` | Secret | 查價收集器專用金鑰，32–256 字元，必須不同於管理員金鑰 |
+| `CF_RADAR_URL` | Variable | 已部署 Worker 的 HTTPS origin，僅供 collector 與 seed workflow |
+| `CF_RADAR_COLLECTOR_ENABLED` | Variable | 只有 current BUILD/NARROW receipt 才可設為 `true` |
+| `CF_RADAR_SEED_ENABLED` | Variable | 只有 collector admission 開啟後才可設為 `true` |
+| `CF_RADAR_MAX_SEARCHES_PER_HOUR` | Variable | 每小時 claim 上限，1–10；預設 3 |
 
 秘密只放平台的 Secret 設定，不貼到對話、Issue、程式碼、URL 或測試報告。前端只在分頁記憶體保留管理員输入，不公開 collector 或 Cloudflare token。
 
 設定完成後，在 Actions 選 `Deploy Cloudflare Workers`，使用 main，確認欄輸入 `ai-flight-radar-cf`。流程會以固定的 Worker 名稱及檢查過的 D1 ID 部署；先發布程式時未配置金鑰的寫入會拒絕，之後將兩個專用金鑰同步到同一個 Worker。任何步驟失敗即停止，可能已完成前面的 migration 或發布，不能把失敗概括為完全沒有改動。
 
 成功網址取自 Wrangler 真實輸出，不由程式猜帳號子網域。驗收包含首頁、app.js、API 身分、真實資料契約、未授權 POST 回應 401。這不代表已成功取得航空報價。最初 `COLLECTOR_ENABLED=false`，通知未整合，資料庫空白時頁面不顯示示範票價。
+
+航空來源校準 protocol 在 `docs/calibration/PROTOCOL.md`。目前 `cloudflare/calibration/admission.json` 的決策是 `BLOCK`：沒有 owner-authorized live calibration，不允許 collector 或 seeding workflow 執行。Worker claim/result/report、collector CLI、seed CLI、工作流程和部署 preflight 都會拒絕過期、無效或 BLOCK receipt。部署 Worker 時保持 collector 關閉仍可用；嘗試部署為 `COLLECTOR_ENABLED=true` 則必須帶有未過期的 BUILD/NARROW receipt。CI 的 synthetic calibration fixtures 只驗證判定程式，不算 Google Flights 可用性或價格真實性證明。
 
 ## 本機驗證
 
@@ -60,7 +68,7 @@ npx --no-install wrangler dev
 
 收集器每批最多 3 個任務、每個來源子程序 90 秒逾時；伺服器預設每小時最多 3 次認領。來源失敗就結束剩餘批次，不執行自動重試或繞過驗證。任務租約 15 分鐘，重送去重、過期擁有者不能覆寫新結果。查無結果與來源錯誤不寫零元快照。
 
-上線並驗證來源後，才另外啟用 collector 範本、設定 GitHub `CF_RADAR_URL`、`CF_RADAR_COLLECTOR_KEY` 和雙邊 enable flag。GitHub 排程不是準點服務，需監控最近成功快照。此初始發布流程每次都保持 collector 關閉；開始正式排程後，要先調整並審閱發布設定，避免更新時意外停用。
+只有 owner 完成 protocol 中的授權、預算與人工 handoff 比對，並審閱/提交通過的 current receipt 後，才可設定 GitHub collector/seed flags。NARROW receipt 只允許列出的路線；BUILD 必須涵蓋目前 16 條設定路線。排程不是準點服務，應監控 API/UI 的 available、partial、stale、unavailable source-health 狀態。此初始發布流程保持 collector 關閉。
 
 任務最多 128、快照最多 20,000、收據最多 100,000；到上限停止新增，不自動刪價格歷史。這些是程式保護，不等於保證帳單為零。免費 CPU、D1 每日讀寫和儲存配額須以實際平台用量驗證。先從少量固定日期收集，不窮舉全年所有航點。
 

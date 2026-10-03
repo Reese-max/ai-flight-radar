@@ -1,8 +1,10 @@
 import contextlib
+import ast
 from datetime import date
 import io
 import json
 from pathlib import Path
+import re
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -41,6 +43,21 @@ class CollectorTests(unittest.TestCase):
         import collector
         with patch.object(sys,'argv',['collector','--execute']),patch.dict('os.environ',{},clear=True):
             with self.assertRaises(SafeFailure):collector.main()
+    def test_execute_refuses_current_BLOCK_receipt_before_network(self):
+        import collector
+        environment={'RADAR_COLLECTOR_ENABLED':'true','RADAR_URL':'https://radar.example','RADAR_COLLECTOR_KEY':'x'*48}
+        with patch.object(sys,'argv',['collector','--execute','--max-tasks','1']),patch.dict('os.environ',environment):
+            with self.assertRaisesRegex(SafeFailure,'calibration'):
+                collector.main()
+    def test_single_search_helper_stops_before_provider_when_calibration_blocks(self):
+        import collector
+        import search_once
+        out=io.StringIO()
+        with patch.object(sys,'stdin',io.StringIO(json.dumps(task()))),patch.object(sys,'stdout',out),\
+            patch('collector.require_calibration_admission',side_effect=SafeFailure('blocked')),\
+            patch('providers.selector.get_provider',side_effect=AssertionError('provider must not run')):
+            search_once.main()
+        self.assertEqual(json.loads(out.getvalue()),{'outcome':'error'})
     def test_https_only(self):
         with self.assertRaises(SafeFailure):validated_origin('http://radar.example')
     def test_no_credentials_in_url(self):
@@ -94,10 +111,20 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(normalize([],task()),{'outcome':'empty'})
     def test_bad_airline_is_unknown_not_invented(self):
         self.assertIsNone(normalize([offer(primary_airline='bad\nname')],task())['airline'])
-    def test_initial_plan_covers_full_route_matrix(self):
-        p=plan(date(2026,9,11));self.assertEqual(len(p['tasks']),48)
-        self.assertEqual(p['tasks'][0],{'origin':'KHH','destination':'CTS','depart_date':'2026-10-11','return_date':'2026-10-15'})
-        self.assertEqual(len({(t['origin'],t['destination']) for t in p['tasks']}),48)
+    def test_initial_plan_matches_the_configured_calibration_route_matrix(self):
+        p=plan(date(2026,9,11));self.assertEqual(len(p['tasks']),16)
+        self.assertEqual(p['tasks'][0],{'origin':'TPE','destination':'NRT','depart_date':'2026-10-11','return_date':'2026-10-15'})
+        self.assertEqual(len({(t['origin'],t['destination']) for t in p['tasks']}),16)
+    def test_task_plan_routes_match_worker_catalog_exactly(self):
+        cloudflare=Path(__file__).resolve().parents[1]
+        catalog=(cloudflare/'src'/'catalog.mjs').read_text(encoding='utf-8')
+        route_block=catalog.split('export const routes = [',1)[1].split('].map',1)[0]
+        expected=set(re.findall(r"\['([A-Z]{3})','([A-Z]{3})'\]",route_block))
+        module=ast.parse((cloudflare/'scripts'/'tasks.py').read_text(encoding='utf-8'))
+        assignment=next(node for node in module.body if isinstance(node,ast.Assign) and
+            any(isinstance(target,ast.Name) and target.id=='ROUTES' for target in node.targets))
+        actual=set(ast.literal_eval(assignment.value))
+        self.assertEqual(actual,expected)
     def test_invalid_plan_duration(self):
         with self.assertRaises(SafeFailure):plan(date(2026,9,11),nights=0)
 

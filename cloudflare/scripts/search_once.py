@@ -23,7 +23,8 @@ def normalize(offers,task):
 
 def main():
     try:
-        from collector import validate_task
+        from collector import validate_task,require_calibration_admission
+        require_calibration_admission()
         task = validate_task(json.loads(sys.stdin.read(16385)))
         from providers.selector import get_provider
         offers = get_provider().search(task['origin'],task['destination'],task['depart_date'],task['return_date'],max_stops=0)
