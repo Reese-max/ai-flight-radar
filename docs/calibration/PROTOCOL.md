@@ -1,6 +1,6 @@
 # Fast Flights source calibration protocol
 
-Protocol version: 1.0  
+Protocol version: 1.0
 Target: the public Cloudflare collector using fast_flights 3.1.0 and Google Flights-derived results.
 
 ## Authorization and limits
