@@ -1,235 +1,1 @@
-import {routes} from './catalog.mjs';
-
-export const PROVIDER='fast_flights';
-export const PROVIDER_VERSION='3.1.0';
-export const PROTOCOL_VERSION='1.0';
-export const OUTCOMES=Object.freeze(['SUCCESS','NO_RESULTS','RATE_LIMITED','UPSTREAM_CHANGED','PARSE_FAILED','BLOCKED']);
-export const ROUTE_KEYS=Object.freeze(routes.map(route=>route.origin+'/'+route.destination));
-export const DATE_WINDOWS=Object.freeze([30,90,180]);
-export const THRESHOLDS=Object.freeze({
-  minimumSamplesPerRoute:3,
-  minimumSearchSuccessRate:0.9,
-  minimumParseCompletenessRate:0.98,
-  maximumQuoteAgeP95Seconds:6*60*60,
-  minimumConsistencyRate:1,
-  minimumSafeLinkRate:1,
-  minimumHandoffComparisons:3,
-  maximumPriceDiscrepancyP95Percent:5,
-  maximumReceiptAgeMs:14*24*60*60*1000,
-});
-
-const hardStopOutcomes=new Set(['RATE_LIMITED','UPSTREAM_CHANGED','PARSE_FAILED','BLOCKED']);
-const reasonCodes=new Set([
-  'authorization_missing','terms_unclear','budget_unapproved','unsupported_profile','owner_stop',
-  'provider_rate_limit','schema_change','partial_payload','upstream_unavailable','source_unavailable',
-  'owner_authorized_live_calibration_not_completed','invalid_or_unredacted_observation',
-  'sample_budget_exceeded','stop_rule_triggered','no_route_meets_predeclared_thresholds',
-]);
-const isObject=value=>value!==null&&typeof value==='object'&&!Array.isArray(value);
-const validTime=value=>typeof value==='string'&&Number.isFinite(Date.parse(value));
-const knownRoute=value=>ROUTE_KEYS.includes(value);
-const receiptKeys=new Set(['schema_version','protocol_version','provider','provider_version','decision','measured_at',
-  'expires_at','allowed_routes','route_metrics','blockers','approvals']);
-const approvalKeys=['owner_authorized','terms_allowed','budget_approved'];
-function validApprovals(value){
-  return isObject(value)&&Object.keys(value).length===approvalKeys.length&&
-    approvalKeys.every(key=>typeof value[key]==='boolean');
-}
-
-function invalid(reason='invalid_receipt'){
-  return {admitted:false,state:'invalid',reason,decision:'BLOCK',allowed_routes:[],measured_at:null,expires_at:null};
-}
-
-function finiteRate(value){
-  return typeof value==='number'&&Number.isFinite(value)&&value>=0&&value<=1;
-}
-
-function routeMetricPass(metric){
-  return isObject(metric)&&
-    Number.isInteger(metric.attempted)&&metric.attempted===DATE_WINDOWS.length&&
-    Number.isInteger(metric.successful)&&metric.successful>=THRESHOLDS.minimumSamplesPerRoute&&
-    Number.isInteger(metric.parse_complete)&&metric.parse_complete>=THRESHOLDS.minimumSamplesPerRoute&&
-    Number.isInteger(metric.parse_sample_count)&&metric.parse_sample_count===metric.attempted&&
-    Array.isArray(metric.date_windows)&&metric.date_windows.length===DATE_WINDOWS.length&&
-    DATE_WINDOWS.every((days,index)=>metric.date_windows[index]===days)&&
-    Number.isInteger(metric.quote_age_sample_count)&&metric.quote_age_sample_count===metric.successful&&
-    ['currency_match_count','passenger_match_count','cabin_match_count','directness_match_count','safe_link_resolved_count']
-      .every(key=>Number.isInteger(metric[key])&&metric[key]===metric.successful)&&
-    finiteRate(metric.search_success_rate)&&metric.search_success_rate>=THRESHOLDS.minimumSearchSuccessRate&&
-    finiteRate(metric.parse_completeness_rate)&&metric.parse_completeness_rate>=THRESHOLDS.minimumParseCompletenessRate&&
-    typeof metric.quote_age_p95_seconds==='number'&&Number.isFinite(metric.quote_age_p95_seconds)&&metric.quote_age_p95_seconds>=0&&metric.quote_age_p95_seconds<=THRESHOLDS.maximumQuoteAgeP95Seconds&&
-    ['currency_consistency_rate','passenger_consistency_rate','cabin_consistency_rate','directness_consistency_rate']
-      .every(key=>finiteRate(metric[key])&&metric[key]>=THRESHOLDS.minimumConsistencyRate)&&
-    finiteRate(metric.safe_link_resolution_rate)&&metric.safe_link_resolution_rate>=THRESHOLDS.minimumSafeLinkRate&&
-    Number.isInteger(metric.handoff_comparison_count)&&metric.handoff_comparison_count>=THRESHOLDS.minimumHandoffComparisons&&
-    typeof metric.price_discrepancy_p95_percent==='number'&&Number.isFinite(metric.price_discrepancy_p95_percent)&&metric.price_discrepancy_p95_percent>=0&&metric.price_discrepancy_p95_percent<=THRESHOLDS.maximumPriceDiscrepancyP95Percent;
-}
-
-const metricKeys=new Set([
-  'attempted','successful','parse_complete','parse_sample_count','date_windows','quote_age_sample_count',
-  'currency_match_count','passenger_match_count','cabin_match_count','directness_match_count','safe_link_resolved_count',
-  'search_success_rate','parse_completeness_rate',
-  'quote_age_p95_seconds','currency_consistency_rate','passenger_consistency_rate',
-  'cabin_consistency_rate','directness_consistency_rate','safe_link_resolution_rate',
-  'handoff_comparison_count','price_discrepancy_p95_percent',
-]);
-
-export function inspectAdmission(value,now=Date.now()){
-  let receipt=value;
-  if(typeof value==='string'){
-    try{receipt=JSON.parse(value);}catch{return invalid();}
-  }
-  if(!isObject(receipt)||Object.keys(receipt).some(key=>!receiptKeys.has(key))||!validApprovals(receipt.approvals)||
-    !Array.isArray(receipt.blockers)||receipt.blockers.some(reason=>!reasonCodes.has(reason))||
-    receipt.schema_version!==1||receipt.protocol_version!==PROTOCOL_VERSION||
-    receipt.provider!==PROVIDER||receipt.provider_version!==PROVIDER_VERSION||
-    !['BUILD','NARROW','BLOCK'].includes(receipt.decision)||!isObject(receipt.route_metrics)||
-    Object.keys(receipt.route_metrics).some(route=>!knownRoute(route)||!isObject(receipt.route_metrics[route])||
-      Object.keys(receipt.route_metrics[route]).some(key=>!metricKeys.has(key)))||
-    !Array.isArray(receipt.allowed_routes)||receipt.allowed_routes.some(route=>!knownRoute(route)))return invalid();
-  if(receipt.decision==='BLOCK'){
-    if(receipt.blockers.length===0||receipt.allowed_routes.length!==0)return invalid();
-    return {admitted:false,state:'blocked',reason:'calibration_blocked',decision:'BLOCK',
-      allowed_routes:[],measured_at:null,expires_at:null};
-  }
-  if(receipt.blockers.length>0||!approvalKeys.every(key=>receipt.approvals[key]===true))return invalid();
-  if(!validTime(receipt.measured_at)||!validTime(receipt.expires_at))return invalid();
-  const measured=Date.parse(receipt.measured_at),expires=Date.parse(receipt.expires_at);
-  if(measured>now+5*60*1000||expires<=measured||expires-measured>THRESHOLDS.maximumReceiptAgeMs)return invalid();
-  if(now>=expires)return {admitted:false,state:'expired',reason:'calibration_expired',decision:receipt.decision,
-    allowed_routes:[],measured_at:receipt.measured_at,expires_at:receipt.expires_at};
-  if(receipt.allowed_routes.length===0||
-    new Set(receipt.allowed_routes).size!==receipt.allowed_routes.length||!receipt.allowed_routes.every(knownRoute)||
-    !isObject(receipt.route_metrics))return invalid();
-  const metricRoutes=Object.keys(receipt.route_metrics);
-  if(metricRoutes.some(route=>!knownRoute(route))||
-    receipt.allowed_routes.some(route=>!receipt.route_metrics[route])||
-    receipt.allowed_routes.some(route=>!routeMetricPass(receipt.route_metrics[route])))return invalid();
-  if(receipt.decision==='BUILD'&&ROUTE_KEYS.some(route=>!receipt.allowed_routes.includes(route)))return invalid();
-  if(receipt.decision==='NARROW'&&receipt.allowed_routes.length>=ROUTE_KEYS.length)return invalid();
-  return {admitted:true,state:'current',reason:'calibration_current',decision:receipt.decision,
-    allowed_routes:[...receipt.allowed_routes],measured_at:receipt.measured_at,expires_at:receipt.expires_at};
-}
-
-const observationKeys=new Set([
-  'outcome','route','queried_at','depart_date','profile','reason_code','parse_complete','quote_age_seconds',
-  'observed_currency','observed_adults','observed_cabin','observed_direct_only','link_resolution',
-  'displayed_price_twd','handoff_price_twd','handoff_checked_at',
-]);
-const quoteKeys=new Set([
-  'parse_complete','quote_age_seconds','observed_currency','observed_adults','observed_cabin',
-  'observed_direct_only','link_resolution','displayed_price_twd','handoff_price_twd','handoff_checked_at',
-]);
-
-function dateWindowDays(item){
-  if(typeof item.depart_date!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(item.depart_date))return null;
-  const departure=Date.parse(item.depart_date+'T00:00:00.000Z');
-  if(!Number.isFinite(departure)||new Date(departure).toISOString().slice(0,10)!==item.depart_date)return null;
-  const taipeiToday=new Date(Date.parse(item.queried_at)+8*60*60*1000).toISOString().slice(0,10);
-  return (departure-Date.parse(taipeiToday+'T00:00:00.000Z'))/86400000;
-}
-
-export function validateObservation(item){
-  if(!isObject(item)||Object.keys(item).some(key=>!observationKeys.has(key))||
-    !OUTCOMES.includes(item.outcome)||!knownRoute(item.route)||!validTime(item.queried_at)||
-    !DATE_WINDOWS.includes(dateWindowDays(item))||!isObject(item.profile))return false;
-  const {trip_type,adults,cabin,direct_only}=item.profile;
-  if(Object.keys(item.profile).some(key=>!['trip_type','adults','cabin','direct_only'].includes(key))||
-    !['one_way','round_trip'].includes(trip_type)||!Number.isInteger(adults)||adults<1||adults>9||
-    !['economy','premium_economy','business','first'].includes(cabin)||typeof direct_only!=='boolean')return false;
-  const supportedProfile=trip_type==='round_trip'&&adults===1&&cabin==='economy'&&direct_only===true;
-  if(!supportedProfile&&item.outcome!=='BLOCKED')return false;
-  if(item.outcome!=='SUCCESS'){
-    if([...Object.keys(item)].some(key=>quoteKeys.has(key)))return false;
-    return item.reason_code===undefined||reasonCodes.has(item.reason_code);
-  }
-  if(!supportedProfile)return false;
-  if(item.reason_code!==undefined||item.parse_complete!==true||
-    !(item.quote_age_seconds===null||(typeof item.quote_age_seconds==='number'&&Number.isFinite(item.quote_age_seconds)&&item.quote_age_seconds>=0))||
-    !(item.observed_currency===null||/^[A-Z]{3}$/.test(item.observed_currency))||
-    !(item.observed_adults===null||(Number.isInteger(item.observed_adults)&&item.observed_adults>=1&&item.observed_adults<=9))||
-    !(item.observed_cabin===null||['economy','premium_economy','business','first'].includes(item.observed_cabin))||
-    !(item.observed_direct_only===null||typeof item.observed_direct_only==='boolean')||
-    !['resolved_safe','unresolved','unsafe'].includes(item.link_resolution)||
-    !(item.displayed_price_twd===null||(Number.isInteger(item.displayed_price_twd)&&item.displayed_price_twd>0))||
-    !(item.handoff_price_twd===null||(Number.isInteger(item.handoff_price_twd)&&item.handoff_price_twd>0))||
-    !(item.handoff_checked_at===null||validTime(item.handoff_checked_at)))return false;
-  if((item.handoff_price_twd===null)!==(item.handoff_checked_at===null))return false;
-  if(item.handoff_price_twd!==null&&(item.displayed_price_twd===null||item.link_resolution!=='resolved_safe'))return false;
-  return true;
-}
-
-function percentile(values,p){
-  if(!values.length)return null;
-  const sorted=[...values].sort((a,b)=>a-b);
-  return sorted[Math.ceil(p*sorted.length)-1];
-}
-function rate(numerator,denominator){return denominator?numerator/denominator:null;}
-function matches(observation,key,expected){
-  return observation[key]!==null&&observation[key]!==undefined&&observation[key]===expected;
-}
-
-export function evaluateCalibration(observations,{authorized=false,terms_allowed=false,budget_approved=false,evaluated_at=new Date().toISOString()}={}){
-  const base={schema_version:1,protocol_version:PROTOCOL_VERSION,provider:PROVIDER,provider_version:PROVIDER_VERSION,
-    decision:'BLOCK',measured_at:null,expires_at:null,allowed_routes:[],route_metrics:{},blockers:[],
-    approvals:{owner_authorized:authorized===true,terms_allowed:terms_allowed===true,budget_approved:budget_approved===true}};
-  const blocker=reason=>({...base,blockers:[reason]});
-  if(authorized!==true)return blocker('authorization_missing');
-  if(terms_allowed!==true)return blocker('terms_unclear');
-  if(budget_approved!==true)return blocker('budget_unapproved');
-  if(!validTime(evaluated_at)||!Array.isArray(observations)||observations.length<1||observations.length>48||
-    observations.some(item=>!validateObservation(item)))return blocker('invalid_or_unredacted_observation');
-  if(observations.some(item=>hardStopOutcomes.has(item.outcome)||item.link_resolution==='unsafe'))return blocker('stop_rule_triggered');
-  const grouped=new Map();
-  for(const item of observations){
-    if(!grouped.has(item.route))grouped.set(item.route,[]);
-    grouped.get(item.route).push(item);
-  }
-  if([...grouped.values()].some(items=>items.length>DATE_WINDOWS.length||
-    new Set(items.map(dateWindowDays)).size!==items.length))return blocker('sample_budget_exceeded');
-  const metrics={};
-  for(const [route,items] of grouped){
-    const successes=items.filter(item=>item.outcome==='SUCCESS');
-    const comparable=successes.filter(item=>item.handoff_price_twd!==null);
-    const quoteAges=successes.map(item=>item.quote_age_seconds).filter(value=>value!==null);
-    const comparisons=comparable.map(item=>Math.abs(item.handoff_price_twd-item.displayed_price_twd)/item.displayed_price_twd*100);
-    const parsedDenominator=successes.length+items.filter(item=>item.outcome==='PARSE_FAILED').length;
-    const profile=items[0].profile;
-    const matchesCurrency=successes.filter(item=>matches(item,'observed_currency','TWD')).length;
-    const matchesPassengers=successes.filter(item=>matches(item,'observed_adults',profile.adults)).length;
-    const matchesCabin=successes.filter(item=>matches(item,'observed_cabin',profile.cabin)).length;
-    const matchesDirectness=successes.filter(item=>matches(item,'observed_direct_only',profile.direct_only)).length;
-    const safeLinks=successes.filter(item=>item.link_resolution==='resolved_safe').length;
-    metrics[route]={
-      attempted:items.length,successful:successes.length,parse_complete:successes.length,
-      parse_sample_count:parsedDenominator,
-      date_windows:[...new Set(items.map(dateWindowDays))].sort((a,b)=>a-b),
-      quote_age_sample_count:quoteAges.length,
-      currency_match_count:matchesCurrency,passenger_match_count:matchesPassengers,cabin_match_count:matchesCabin,
-      directness_match_count:matchesDirectness,safe_link_resolved_count:safeLinks,
-      search_success_rate:rate(successes.length,items.length),
-      parse_completeness_rate:rate(successes.length,parsedDenominator),
-      quote_age_p95_seconds:percentile(quoteAges,.95),
-      currency_consistency_rate:rate(matchesCurrency,successes.length),
-      passenger_consistency_rate:rate(matchesPassengers,successes.length),
-      cabin_consistency_rate:rate(matchesCabin,successes.length),
-      directness_consistency_rate:rate(matchesDirectness,successes.length),
-      safe_link_resolution_rate:rate(safeLinks,successes.length),
-      handoff_comparison_count:comparable.length,
-      price_discrepancy_p95_percent:percentile(comparisons,.95),
-    };
-  }
-  const allowed=ROUTE_KEYS.filter(route=>metrics[route]&&routeMetricPass(metrics[route]));
-  if(!allowed.length)return {...base,route_metrics:metrics,blockers:['no_route_meets_predeclared_thresholds']};
-  const decision=allowed.length===ROUTE_KEYS.length?'BUILD':'NARROW';
-  const measuredAt=new Date(Date.parse(evaluated_at)).toISOString();
-  return {...base,decision,measured_at:measuredAt,
-    expires_at:new Date(Date.parse(measuredAt)+THRESHOLDS.maximumReceiptAgeMs).toISOString(),
-    allowed_routes:allowed,route_metrics:metrics,blockers:[]};
-}
-
-export function collectorAdmission(env,now=Date.now()){
-  if(env.COLLECTOR_ENABLED!=='true')return {admitted:false,state:'disabled',reason:'collector_disabled',
-    decision:inspectAdmission(env.CALIBRATION_ADMISSION,now).decision,allowed_routes:[]};
-  return inspectAdmission(env.CALIBRATION_ADMISSION,now);
-}
+YªçŠx-®éÜj×¢ëiºÚ+Š§j[h‘éÜ¢éíç}xN‹Z–‹­¦ëeŠw¬Õ¥µÁ½ÉÐíÉ½ÕÑ•Íô™É½´€œ¸½…Ñ…±½œ¹µ©Ìœì()•áÁ½ÉÐ½¹ÍÐAI=Y%Hô™…ÍÑ}™±¥¡ÑÌœì)•áÁ½ÉÐ½¹ÍÐAI=Y%I}YIM%=8ôœÌ¸Ä¸Àœì)•áÁ½ÉÐ½¹ÍÐAI=Q==1}YIM%=8ôœÄ¸Àœì)•áÁ½ÉÐ½¹ÍÐ=UQ=5Lõ=‰©•Ð¹™É••é”¡lMUMLœ°9=}IMU1QLœ°IQ}1%5%Qœ°UAMQI5}!9œ°AIM}%1œ°	1=-t¤ì)•áÁ½ÉÐ½¹ÍÐII=I}QeALõ=‰©•Ð¹™É••é”¡lIQ}1%5%Qœ°UAMQI5}!9œ°AIM}%1œ°Q%5=UPœ°	1=-œ°M=UI}U9Y%1	1œ°U9-9=]8t¤ì)•áÁ½ÉÐ½¹ÍÐI=UQ}-eLõ=‰©•Ð¹™É••é”¡É½ÕÑ•Ì¹µ…À¡É½ÕÑ”ôùÉ½ÕÑ”¹½É¥¥¸¬œ¼œ­É½ÕÑ”¹‘•ÍÑ¥¹…Ñ¥½¸¤¤ì)•áÁ½ÉÐ½¹ÍÐQ}]%9=]Lõ=‰©•Ð¹™É••é”¡lÌÀ°äÀ°ÄàÁt¤ì)•áÁ½ÉÐ½¹ÍÐQ!IM!=1Lõ=‰©•Ð¹™É••é”¡ì(€µ¥¹¥µÕµM…µÁ±•ÍA•ÉI½ÕÑ”èÌ°(€µ¥¹¥µÕµM•…É¡MÕ•ÍÍI…Ñ”èÀ¸ä°(€µ¥¹¥µÕµA…ÉÍ•½µÁ±•Ñ•¹•ÍÍI…Ñ”èÀ¸äà°(€µ…á¥µÕµEÕ½Ñ••@äÕM•½¹‘ÌèØ¨ØÀ¨ØÀ°(€µ¥¹¥µÕµ½¹Í¥ÍÑ•¹åI…Ñ”èÄ°(€µ¥¹¥µÕµM…™•1¥¹­I…Ñ”èÄ°(€µ¥¹¥µÕµ!…¹‘½™™½µÁ…É¥Í½¹ÌèÌ°(€µ…á¥µÕµAÉ¥•¥ÍÉ•Á…¹å@äÕA•É•¹ÐèÔ°(€µ…á¥µÕµI••¥ÁÑ•5ÌèÄÐ¨ÈÐ¨ØÀ¨ØÀ¨ÄÀÀÀ°)ô¤ì()½¹ÍÐ¡…É‘MÑ½Á=ÕÑ½µ•Ìõ¹•ÜM•Ð¡lIQ}1%5%Qœ°UAMQI5}!9œ°AIM}%1œ°	1=-t¤ì)½¹ÍÐÉ•…Í½¹½‘•Ìõ¹•ÜM•Ð¡l(€€…ÕÑ¡½É¥é…Ñ¥½¹}µ¥ÍÍ¥¹œœ°Ñ•ÉµÍ}Õ¹±•…Èœ°‰Õ‘•Ñ}Õ¹…ÁÁÉ½Ù•œ°Õ¹ÍÕÁÁ½ÉÑ•‘}ÁÉ½™¥±”œ°½Ý¹•É}ÍÑ½Àœ°(€€ÁÉ½Ù¥‘•É}É…Ñ•}±¥µ¥Ðœ°Í¡•µ…}¡…¹”œ°Á…ÉÑ¥…±}Á…å±½…œ°ÕÁÍÑÉ•…µ}Õ¹…Ù…¥±…‰±”œ°Í½ÕÉ•}Õ¹…Ù…¥±…‰±”œ°(€€½Ý¹•É}…ÕÑ¡½É¥é•‘}±¥Ù•}…±¥‰É…Ñ¥½¹}¹½Ñ}½µÁ±•Ñ•œ°¥¹Ù…±¥‘}½É}Õ¹É•‘…Ñ•‘}½‰Í•ÉÙ…Ñ¥½¸œ°(€€Í…µÁ±•}‰Õ‘•Ñ}•á••‘•œ°ÍÑ½Á}ÉÕ±•}ÑÉ¥•É•œ°¹½}É½ÕÑ•}µ••ÑÍ}ÁÉ•‘•±…É•‘}Ñ¡É•Í¡½±‘Ìœ°)t¤ì)½¹ÍÐ¥Í=‰©•ÐõÙ…±Õ”ôùÙ…±Õ”„ôõ¹Õ±°˜™ÑåÁ•½˜Ù…±Õ”ôôô½‰©•Ðœ˜˜…ÉÉ…ä¹¥ÍÉÉ…ä¡Ù…±Õ”¤ì)½¹ÍÐÙ…±¥‘Q¥µ”õÙ…±Õ”ôùÑåÁ•½˜Ù…±Õ”ôôôÍÑÉ¥¹œœ˜™9Õµ‰•È¹¥Í¥¹¥Ñ”¡…Ñ”¹Á…ÉÍ”¡Ù…±Õ”¤¤ì)½¹ÍÐ­¹½Ý¹I½ÕÑ”õÙ…±Õ”ôùI=UQ}-eL¹¥¹±Õ‘•Ì¡Ù…±Õ”¤ì)½¹ÍÐÉ••¥ÁÑ-•åÌõ¹•ÜM•Ð¡lÍ¡•µ…}Ù•ÉÍ¥½¸œ°ÁÉ½Ñ½½±}Ù•ÉÍ¥½¸œ°ÁÉ½Ù¥‘•Èœ°ÁÉ½Ù¥‘•É}Ù•ÉÍ¥½¸œ°‘•¥Í¥½¸œ°µ•…ÍÕÉ•‘}…Ðœ°(€€•áÁ¥É•Í}…Ðœ°…±±½Ý•‘}É½ÕÑ•Ìœ°É½ÕÑ•}µ•ÑÉ¥Ìœ°‰±½­•ÉÌœ°…ÁÁÉ½Ù…±Ìt¤ì)½¹ÍÐ…ÁÁÉ½Ù…±-•åÌõl½Ý¹•É}…ÕÑ¡½É¥é•œ°Ñ•ÉµÍ}…±±½Ý•œ°‰Õ‘•Ñ}…ÁÁÉ½Ù•tì)™Õ¹Ñ¥½¸Ù…±¥‘ÁÁÉ½Ù…±Ì¡Ù…±Õ”¥ì(€É•ÑÕÉ¸¥Í=‰©•Ð¡Ù…±Õ”¤˜™=‰©•Ð¹­•åÌ¡Ù…±Õ”¤¹±•¹Ñ ôôõ…ÁÁÉ½Ù…±-•åÌ¹±•¹Ñ ˜˜(€€€…ÁÁÉ½Ù…±-•åÌ¹•Ù•Éä¡­•äôùÑåÁ•½˜Ù…±Õ•m­•åtôôô‰½½±•…¸œ¤ì)ô()™Õ¹Ñ¥½¸¥¹Ù…±¥¡É•…Í½¸ô¥¹Ù…±¥‘}É••¥ÁÐœ¥ì(€É•ÑÕÉ¸í…‘µ¥ÑÑ•é™…±Í”±ÍÑ…Ñ”è¥¹Ù…±¥œ±É•…Í½¸±‘•¥Í¥½¸è	1=,œ±…±±½Ý•‘}É½ÕÑ•Ìémt±µ•…ÍÕÉ•‘}…Ðé¹Õ±°±•áÁ¥É•Í}…Ðé¹Õ±±ôì)ô()™Õ¹Ñ¥½¸™¥¹¥Ñ•I…Ñ”¡Ù…±Õ”¥ì(€É•ÑÕÉ¸ÑåÁ•½˜Ù…±Õ”ôôô¹Õµ‰•Èœ˜™9Õµ‰•È¹¥Í¥¹¥Ñ”¡Ù…±Õ”¤˜™Ù…±Õ”øôÀ˜™Ù…±Õ”ðôÄì)ô()™Õ¹Ñ¥½¸É½ÕÑ•5•ÑÉ¥A…ÍÌ¡µ•ÑÉ¥Œ¥ì(€É•ÑÕÉ¸¥Í=‰©•Ð¡µ•ÑÉ¥Œ¤˜˜(€€€9Õµ‰•È¹¥Í%¹Ñ••È¡µ•ÑÉ¥Œ¹…ÑÑ•µÁÑ•¤˜™µ•ÑÉ¥Œ¹…ÑÑ•µÁÑ•ôôõQ}]%9=]L¹±•¹Ñ ˜˜(€€€9Õµ‰•È¹¥Í%¹Ñ••È¡µ•ÑÉ¥Œ¹ÍÕ•ÍÍ™Õ°¤˜™µ•ÑÉ¥Œ¹ÍÕ•ÍÍ™Õ°øõQ!IM!=1L¹µ¥¹¥µÕµM…µÁ±•ÍA•ÉI½ÕÑ”˜˜(€€€9Õµ‰•È¹¥Í%¹Ñ••È¡µ•ÑÉ¥Œ¹Á…ÉÍ•}½µÁ±•Ñ”¤˜™µ•ÑÉ¥Œ¹Á…ÉÍ•}½µÁ±•Ñ”øõQ!IM!=1L¹µ¥¹¥µÕµM…µÁ±•ÍA•ÉI½ÕÑ”˜˜(€€€9Õµ‰•È¹¥Í%¹Ñ••È¡µ•ÑÉ¥Œ¹Á…ÉÍ•}Í…µÁ±•}½Õ¹Ð¤˜™µ•ÑÉ¥Œ¹Á…ÉÍ•}Í…µÁ±•}½Õ¹Ðôôõµ•ÑÉ¥Œ¹…ÑÑ•µÁÑ•˜˜(€€€ÉÉ…ä¹¥ÍÉÉ…ä¡µ•ÑÉ¥Œ¹‘…Ñ•}Ý¥¹‘½ÝÌ¤˜™µ•ÑÉ¥Œ¹‘…Ñ•}Ý¥¹‘½ÝÌ¹±•¹Ñ ôôõQ}]%9=]L¹±•¹Ñ ˜˜(€€€Q}]%9=]L¹•Ù•Éä ¡‘…åÌ±¥¹‘•à¤ôùµ•ÑÉ¥Œ¹‘…Ñ•}Ý¥¹‘½ÝÍm¥¹‘•átôôõ‘…åÌ¤˜˜(€€€9Õµ‰•È¹¥Í%¹Ñ••È¡µ•ÑÉ¥Œ¹ÅÕ½Ñ•}…•}Í…µÁ±•}½Õ¹Ð¤˜™µ•ÑÉ¥Œ¹ÅÕ½Ñ•}…•}Í…µÁ±•}½Õ¹Ðôôõµ•ÑÉ¥Œ¹ÍÕ•ÍÍ™Õ°˜˜(€€€lÕÉÉ•¹å}µ…Ñ¡}½Õ¹Ðœ°Á…ÍÍ•¹•É}µ…Ñ¡}½Õ¹Ðœ°…‰¥¹}µ…Ñ¡}½Õ¹Ðœ°‘¥É•Ñ¹•ÍÍ}µ…Ñ¡}½Õ¹Ðœ°Í…™•}±¥¹­}É•Í½±Ù•‘}½Õ¹Ðt(€€€€€€¹•Ù•Éä¡­•äôù9Õµ‰•È¹¥Í%¹Ñ••È¡µ•ÑÉ¥m­•åt¤˜™µ•ÑÉ¥m­•åtôôõµ•ÑÉ¥Œ¹ÍÕ•ÍÍ™Õ°¤˜˜(€€€™¥¹¥Ñ•I…Ñ”¡µ•ÑÉ¥Œ¹Í•…É¡}ÍÕ•ÍÍ}É…Ñ”¤˜™µ•ÑÉ¥Œ¹Í•…É¡}ÍÕ•ÍÍ}É…Ñ”øõQ!IM!=1L¹µ¥¹¥µÕµM•…É¡MÕ•ÍÍI…Ñ”˜˜(€€€™¥¹¥Ñ•I…Ñ”¡µ•ÑÉ¥Œ¹Á…ÉÍ•}½µÁ±•Ñ•¹•ÍÍ}É…Ñ”¤˜™µ•ÑÉ¥Œ¹Á…ÉÍ•}½µÁ±•Ñ•¹•ÍÍ}É…Ñ”øõQ!IM!=1L¹µ¥¹¥µÕµA…ÉÍ•½µÁ±•Ñ•¹•ÍÍI…Ñ”˜˜(€€€ÑåÁ•½˜µ•ÑÉ¥Œ¹ÅÕ½Ñ•}…•}ÀäÕ}Í•½¹‘Ìôôô¹Õµ‰•Èœ˜™9Õµ‰•È¹¥Í¥¹¥Ñ”¡µ•ÑÉ¥Œ¹ÅÕ½Ñ•}…•}ÀäÕ}Í•½¹‘Ì¤˜™µ•ÑÉ¥Œ¹ÅÕ½Ñ•}…•}ÀäÕ}Í•½¹‘ÌøôÀ˜™µ•ÑÉ¥Œ¹ÅÕ½Ñ•}…•}ÀäÕ}Í•½¹‘ÌðõQ!IM!=1L¹µ…á¥µÕµEÕ½Ñ••@äÕM•½¹‘Ì˜˜(€€€lÕÉÉ•¹å}½¹Í¥ÍÑ•¹å}É…Ñ”œ°Á…ÍÍ•¹•É}½¹Í¥ÍÑ•¹å}É…Ñ”œ°…‰¥¹}½¹Í¥ÍÑ•¹å}É…Ñ”œ°‘¥É•Ñ¹•ÍÍ}½¹Í¥ÍÑ•¹å}É…Ñ”t(€€€€€€¹•Ù•Éä¡­•äôù™¥¹¥Ñ•I…Ñ”¡µ•ÑÉ¥m­•åt¤˜™µ•ÑÉ¥m­•åtøõQ!IM!=1L¹µ¥¹¥µÕµ½¹Í¥ÍÑ•¹åI…Ñ”¤˜˜(€€€™¥¹¥Ñ•I…Ñ”¡µ•ÑÉ¥Œ¹Í…™•}±¥¹­}É•Í½±ÕÑ¥½¹}É…Ñ”¤˜™µ•ÑÉ¥Œ¹Í…™•}±¥¹­}É•Í½±ÕÑ¥½¹}É…Ñ”øõQ!IM!=1L¹µ¥¹¥µÕµM…™•1¥¹­I…Ñ”˜˜(€€€9Õµ‰•È¹¥Í%¹Ñ••È¡µ•ÑÉ¥Œ¹¡…¹‘½™™}½µÁ…É¥Í½¹}½Õ¹Ð¤˜™µ•ÑÉ¥Œ¹¡…¹‘½™™}½µÁ…É¥Í½¹}½Õ¹ÐøõQ!IM!=1L¹µ¥¹¥µÕµ!…¹‘½™™½µÁ…É¥Í½¹Ì˜˜(€€€ÑåÁ•½˜µ•ÑÉ¥Œ¹ÁÉ¥•}‘¥ÍÉ•Á…¹å}ÀäÕ}Á•É•¹Ðôôô¹Õµ‰•Èœ˜™9Õµ‰•È¹¥Í¥¹¥Ñ”¡µ•ÑÉ¥Œ¹ÁÉ¥•}‘¥ÍÉ•Á…¹å}ÀäÕ}Á•É•¹Ð¤˜™µ•ÑÉ¥Œ¹ÁÉ¥•}‘¥ÍÉ•Á…¹å}ÀäÕ}Á•É•¹ÐøôÀ˜™µ•ÑÉ¥Œ¹ÁÉ¥•}‘¥ÍÉ•Á…¹å}ÀäÕ}Á•É•¹ÐðõQ!IM!=1L¹µ…á¥µÕµAÉ¥•¥ÍÉ•Á…¹å@äÕA•É•¹Ðì)ô()½¹ÍÐµ•ÑÉ¥-•åÌõ¹•ÜM•Ð¡l(€€…ÑÑ•µÁÑ•œ°ÍÕ•ÍÍ™Õ°œ°Á…ÉÍ•}½µÁ±•Ñ”œ°Á…ÉÍ•}Í…µÁ±•}½Õ¹Ðœ°‘…Ñ•}Ý¥¹‘½ÝÌœ°ÅÕ½Ñ•}…•}Í…µÁ±•}½Õ¹Ðœ°(€€ÕÉÉ•¹å}µ…Ñ¡}½Õ¹Ðœ°Á…ÍÍ•¹•É}µ…Ñ¡}½Õ¹Ðœ°…‰¥¹}µ…Ñ¡}½Õ¹Ðœ°‘¥É•Ñ¹•ÍÍ}µ…Ñ¡}½Õ¹Ðœ°Í…™•}±¥¹­}É•Í½±Ù•‘}½Õ¹Ðœ°(€€Í•…É¡}ÍÕ•ÍÍ}É…Ñ”œ°Á…ÉÍ•}½µÁ±•Ñ•¹•ÍÍ}É…Ñ”œ°(€€ÅÕ½Ñ•}…•}ÀäÕ}Í•½¹‘Ìœ°ÕÉÉ•¹å}½¹Í¥ÍÑ•¹å}É…Ñ”œ°Á…ÍÍ•¹•É}½¹Í¥ÍÑ•¹å}É…Ñ”œ°(€€…‰¥¹}½¹Í¥ÍÑ•¹å}É…Ñ”œ°‘¥É•Ñ¹•ÍÍ}½¹Í¥ÍÑ•¹å}É…Ñ”œ°Í…™•}±¥¹­}É•Í½±ÕÑ¥½¹}É…Ñ”œ°(€€¡…¹‘½™™}½µÁ…É¥Í½¹}½Õ¹Ðœ°ÁÉ¥•}‘¥ÍÉ•Á…¹å}ÀäÕ}Á•É•¹Ðœ°)t¤ì()•áÁ½ÉÐ™Õ¹Ñ¥½¸¥¹ÍÁ•Ñ‘µ¥ÍÍ¥½¸¡Ù…±Õ”±¹½Üõ…Ñ”¹¹½Ü ¤¥ì(€±•ÐÉ••¥ÁÐõÙ…±Õ”ì(€¥˜¡ÑåÁ•½˜Ù…±Õ”ôôôÍÑÉ¥¹œœ¥ì(€€€ÑÉåíÉ••¥ÁÐõ)M=8¹Á…ÉÍ”¡Ù…±Õ”¤íõ…Ñ¡íÉ•ÑÕÉ¸¥¹Ù…±¥ ¤íô(€ô(€¥˜ …¥Í=‰©•Ð¡É••¥ÁÐ¥ññ=‰©•Ð¹­•åÌ¡É••¥ÁÐ¤¹Í½µ”¡­•äôø…É••¥ÁÑ-•åÌ¹¡…Ì¡­•ä¤¥ñð…Ù…±¥‘ÁÁÉ½Ù…±Ì¡É••¥ÁÐ¹…ÁÁÉ½Ù…±Ì¥ñð(€€€€…ÉÉ…ä¹¥ÍÉÉ…ä¡É••¥ÁÐ¹‰±½­•ÉÌ¥ññÉ••¥ÁÐ¹‰±½­•ÉÌ¹Í½µ”¡É•…Í½¸ôø…É•…Í½¹½‘•Ì¹¡…Ì¡É•…Í½¸¤¥ñð(€€€É••¥ÁÐ¹Í¡•µ…}Ù•ÉÍ¥½¸„ôôÅññÉ••¥ÁÐ¹ÁÉ½Ñ½½±}Ù•ÉÍ¥½¸„ôõAI=Q==1}YIM%=9ñð(€€€É••¥ÁÐ¹ÁÉ½Ù¥‘•È„ôõAI=Y%IññÉ••¥ÁÐ¹ÁÉ½Ù¥‘•É}Ù•ÉÍ¥½¸„ôõAI=Y%I}YIM%=9ñð(€€€€…l	U%1œ°9II=\œ°	1=,t¹¥¹±Õ‘•Ì¡É••¥ÁÐ¹‘•¥Í¥½¸¥ñð…¥Í=‰©•Ð¡É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥Ì¥ñð(€€€=‰©•Ð¹­•åÌ¡É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥Ì¤¹Í½µ”¡É½ÕÑ”ôø…­¹½Ý¹I½ÕÑ”¡É½ÕÑ”¥ñð…¥Í=‰©•Ð¡É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥ÍmÉ½ÕÑ•t¥ñð(€€€€€=‰©•Ð¹­•åÌ¡É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥ÍmÉ½ÕÑ•t¤¹Í½µ”¡­•äôø…µ•ÑÉ¥-•åÌ¹¡…Ì¡­•ä¤¤¥ñð(€€€€…ÉÉ…ä¹¥ÍÉÉ…ä¡É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¥ññÉ••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹Í½µ”¡É½ÕÑ”ôø…­¹½Ý¹I½ÕÑ”¡É½ÕÑ”¤¤¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€¥˜¡É••¥ÁÐ¹‘•¥Í¥½¸ôôô	1=,œ¥ì(€€€¥˜¡É••¥ÁÐ¹‰±½­•ÉÌ¹±•¹Ñ ôôôÁññÉ••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹±•¹Ñ „ôôÀ¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€€€É•ÑÕÉ¸í…‘µ¥ÑÑ•é™…±Í”±ÍÑ…Ñ”è‰±½­•œ±É•…Í½¸è…±¥‰É…Ñ¥½¹}‰±½­•œ±‘•¥Í¥½¸è	1=,œ°(€€€€€…±±½Ý•‘}É½ÕÑ•Ìémt±µ•…ÍÕÉ•‘}…Ðé¹Õ±°±•áÁ¥É•Í}…Ðé¹Õ±±ôì(€ô(€¥˜¡É••¥ÁÐ¹‰±½­•ÉÌ¹±•¹Ñ øÁñð……ÁÁÉ½Ù…±-•åÌ¹•Ù•Éä¡­•äôùÉ••¥ÁÐ¹…ÁÁÉ½Ù…±Ím­•åtôôõÑÉÕ”¤¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€¥˜ …Ù…±¥‘Q¥µ”¡É••¥ÁÐ¹µ•…ÍÕÉ•‘}…Ð¥ñð…Ù…±¥‘Q¥µ”¡É••¥ÁÐ¹•áÁ¥É•Í}…Ð¤¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€½¹ÍÐµ•…ÍÕÉ•õ…Ñ”¹Á…ÉÍ”¡É••¥ÁÐ¹µ•…ÍÕÉ•‘}…Ð¤±•áÁ¥É•Ìõ…Ñ”¹Á…ÉÍ”¡É••¥ÁÐ¹•áÁ¥É•Í}…Ð¤ì(€¥˜¡µ•…ÍÕÉ•ù¹½Ü¬Ô¨ØÀ¨ÄÀÀÁññ•áÁ¥É•Ìðõµ•…ÍÕÉ•‘ññ•áÁ¥É•Ìµµ•…ÍÕÉ•ùQ!IM!=1L¹µ…á¥µÕµI••¥ÁÑ•5Ì¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€¥˜¡¹½Üøõ•áÁ¥É•Ì¥É•ÑÕÉ¸í…‘µ¥ÑÑ•é™…±Í”±ÍÑ…Ñ”è•áÁ¥É•œ±É•…Í½¸è…±¥‰É…Ñ¥½¹}•áÁ¥É•œ±‘•¥Í¥½¸éÉ••¥ÁÐ¹‘•¥Í¥½¸°(€€€…±±½Ý•‘}É½ÕÑ•Ìémt±µ•…ÍÕÉ•‘}…ÐéÉ••¥ÁÐ¹µ•…ÍÕÉ•‘}…Ð±•áÁ¥É•Í}…ÐéÉ••¥ÁÐ¹•áÁ¥É•Í}…Ñôì(€¥˜¡É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹±•¹Ñ ôôôÁñð(€€€¹•ÜM•Ð¡É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¤¹Í¥é”„ôõÉ••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹±•¹Ñ¡ñð…É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹•Ù•Éä¡­¹½Ý¹I½ÕÑ”¥ñð(€€€€…¥Í=‰©•Ð¡É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥Ì¤¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€½¹ÍÐµ•ÑÉ¥I½ÕÑ•Ìõ=‰©•Ð¹­•åÌ¡É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥Ì¤ì(€¥˜¡µ•ÑÉ¥I½ÕÑ•Ì¹Í½µ”¡É½ÕÑ”ôø…­¹½Ý¹I½ÕÑ”¡É½ÕÑ”¤¥ñð(€€€É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹Í½µ”¡É½ÕÑ”ôø…É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥ÍmÉ½ÕÑ•t¥ñð(€€€É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹Í½µ”¡É½ÕÑ”ôø…É½ÕÑ•5•ÑÉ¥A…ÍÌ¡É••¥ÁÐ¹É½ÕÑ•}µ•ÑÉ¥ÍmÉ½ÕÑ•t¤¤¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€¥˜¡É••¥ÁÐ¹‘•¥Í¥½¸ôôô	U%1œ˜™I=UQ}-eL¹Í½µ”¡É½ÕÑ”ôø…É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹¥¹±Õ‘•Ì¡É½ÕÑ”¤¤¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€¥˜¡É••¥ÁÐ¹‘•¥Í¥½¸ôôô9II=\œ˜™É••¥ÁÐ¹…±±½Ý•‘}É½ÕÑ•Ì¹±•¹Ñ øõI=UQ}-eL¹±•¹Ñ ¥É•ÑÕÉ¸¥¹Ù…±¥ ¤ì(€É•ÑÕÉ¸í…‘µ¥ÑÑ•éÑÉÕ”±Ï}x¶‰žËkºwµçe¹¥Ñ”¡‘•Á…ÉÑÕÉ”¥ññ¹•Ü…Ñ”¡‘•Á…ÉÑÕÉ”¤¹Ñ½%M=MÑÉ¥¹œ ¤¹Í±¥” À°ÄÀ¤„ôõ¥Ñ•´¹‘•Á…ÉÑ}‘…Ñ”¥É•ÑÕÉ¸¹Õ±°ì(€½¹ÍÐÑ…¥Á•¥Q½‘…äõ¹•Ü…Ñ”¡…Ñ”¹Á…ÉÍ”¡¥Ñ•´¹ÅÕ•É¥•‘}…Ð¤¬à¨ØÀ¨ØÀ¨ÄÀÀÀ¤¹Ñ½%M=MÑÉ¥¹œ ¤¹Í±¥” À°ÄÀ¤ì(€É•ÑÕÉ¸€¡‘•Á…ÉÑÕÉ”µ…Ñ”¹Á…ÉÍ”¡Ñ…¥Á•¥Q½‘…ä¬PÀÀèÀÀèÀÀ¸ÀÀÁhœ¤¤¼àØÐÀÀÀÀÀì)ô()•áÁ½ÉÐ™Õ¹Ñ¥½¸Ù…±¥‘…Ñ•=‰Í•ÉÙ…Ñ¥½¸¡¥Ñ•´¥ì(€¥˜ …¥Í=‰©•Ð¡¥Ñ•´¥ññ=‰©•Ð¹­•åÌ¡¥Ñ•´¤¹Í½µ”¡­•äôø…½‰Í•ÉÙ…Ñ¥½¹-•åÌ¹¡…Ì¡­•ä¤¥ñð(€€€€…=UQ=5L¹¥¹±Õ‘•Ì¡¥Ñ•´¹½ÕÑ½µ”¥ñð…­¹½Ý¹I½ÕÑ”¡¥Ñ•´¹É½ÕÑ”¥ñð…Ù…±¥‘Q¥µ”¡¥Ñ•´¹ÅÕ•É¥•‘}…Ð¥ñð(€€€€…Q}]%9=]L¹¥¹±Õ‘•Ì¡‘…Ñ•]¥¹‘½Ý…åÌ¡¥Ñ•´¤¥ñð…¥Í=‰©•Ð¡¥Ñ•´¹ÁÉ½™¥±”¤¥É•ÑÕÉ¸™…±Í”ì(€½¹ÍÐíÑÉ¥Á}ÑåÁ”±…‘Õ±ÑÌ±…‰¥¸±‘¥É•Ñ}½¹±åôõ¥Ñ•´¹ÁÉ½™¥±”ì(€¥˜¡=‰©•Ð¹­•åÌ¡¥Ñ•´¹ÁÉ½™¥±”¤¹Í½µ”¡­•äôø…lÑÉ¥Á}ÑåÁ”œ°…‘Õ±ÑÌœ°…‰¥¸œ°‘¥É•Ñ}½¹±ät¹¥¹±Õ‘•Ì¡­•ä¤¥ñð(€€€€…l½¹•}Ý…äœ°É½Õ¹‘}ÑÉ¥Àt¹¥¹±Õ‘•Ì¡ÑÉ¥Á}ÑåÁ”¥ñð…9Õµ‰•È¹¥Í%¹Ñ••È¡…‘Õ±ÑÌ¥ññ…‘Õ±ÑÌðÅññ…‘Õ±ÑÌøåñð(€€€€…l•½¹½µäœ°ÁÉ•µ¥Õµ}•½¹½µäœ°‰ÕÍ¥¹•ÍÌœ°™¥ÉÍÐt¹¥¹±Õ‘•Ì¡…‰¥¸¥ññÑåÁ•½˜‘¥É•Ñ}½¹±ä„ôô‰½½±•…¸œ¥É•ÑÕÉ¸™…±Í”ì(€½¹ÍÐÍÕÁÁ½ÉÑ•‘AÉ½™¥±”õÑÉ¥Á}ÑåÁ”ôôôÉ½Õ¹‘}ÑÉ¥Àœ˜™…‘Õ±ÑÌôôôÄ˜™…‰¥¸ôôô•½¹½µäœ˜™‘¥É•Ñ}½¹±äôôõÑÉÕ”ì(€¥˜ …ÍÕÁÁ½ÉÑ•‘AÉ½™¥±”˜™¥Ñ•´¹½ÕÑ½µ”„ôô	1=-œ¥É•ÑÕÉ¸™…±Í”ì(€¥˜¡¥Ñ•´¹½ÕÑ½µ”„ôôMUMLœ¥ì(€€€¥˜¡l¸¸¹=‰©•Ð¹­•åÌ¡¥Ñ•´¥t¹Í½µ”¡­•äôùÅÕ½Ñ•-•åÌ¹¡…Ì¡­•ä¤¤¥É•ÑÕÉ¸™…±Í”ì(€€€É•ÑÕÉ¸¥Ñ•´¹É•…Í½¹}½‘”ôôõÕ¹‘•™¥¹•‘ññÉ•…Í½¹½‘•Ì¹¡…Ì¡¥Ñ•´¹É•…Í½¹}½‘”¤ì(€ô(€¥˜ …ÍÕÁÁ½ÉÑ•‘AÉ½™¥±”¥É•ÑÕÉ¸™…±Í”ì(€¥˜¡¥Ñ•´¹É•…Í½¹}½‘”„ôõÕ¹‘•™¥¹•‘ññ¥Ñ•´¹Á…ÉÍ•}½µÁ±•Ñ”„ôõÑÉÕ•ñð(€€€€„¡¥Ñ•´¹ÅÕ½Ñ•}…•}Í•½¹‘Ìôôõ¹Õ±±ñð¡ÑåÁ•½˜¥Ñ•´¹ÅÕ½Ñ•}…•}Í•½¹‘Ìôôô¹Õµ‰•Èœ˜™9Õµ‰•È¹¥Í¥¹¥Ñ”¡¥Ñ•´¹ÅÕ½Ñ•}…•}Í•½¹‘Ì¤˜™¥Ñ•´¹ÅÕ½Ñ•}…•}Í•½¹‘ÌøôÀ¤¥ñð(€€€€„¡¥Ñ•´¹½‰Í•ÉÙ•‘}ÕÉÉ•¹äôôõ¹Õ±±ñð½ymµiuìÍô¼¹Ñ•ÍÐ¡¥Ñ•´¹½‰Í•ÉÙ•‘}ÕÉÉ•¹ä¤¥ñð(€€€€„¡¥Ñ•´¹½‰Í•ÉÙ•‘}…‘Õ±ÑÌôôõ¹Õ±±ñð¡9Õµ‰•È¹¥Í%¹Ñ••È¡¥Ñ•´¹½‰Í•ÉÙ•‘}…‘Õ±ÑÌ¤˜™¥Ñ•´¹½‰Í•ÉÙ•‘}…‘Õ±ÑÌøôÄ˜™¥Ñ•´¹½‰Í•ÉÙ•‘}…‘Õ±ÑÌðôä¤¥ñð(€€€€„¡¥Ñ•´¹½‰Í•ÉÙ•‘}…‰¥¸ôôõ¹Õ±±ññl•½¹½µäœ°ÁÉ•µ¥Õµ}•½¹½µäœ°‰ÕÍ¥¹•ÍÌœ°™¥ÉÍÐt¹¥¹±Õ‘•Ì¡¥Ñ•´¹½‰Í•ÉÙ•‘}…‰¥¸¤¥ñð(€€€€„¡¥Ñ•´¹½‰Í•ÉÙ•‘}‘¥É•Ñ}½¹±äôôõ¹Õ±±ññÑåÁ•½˜¥Ñ•´¹½‰Í•ÉÙ•‘}‘¥É•Ñ}½¹±äôôô‰½½±•…¸œ¥ñð(€€€€…lÉ•Í½±Ù•‘}Í…™”œ°Õ¹É•Í½±Ù•œ°Õ¹Í…™”t¹¥¹±Õ‘•Ì¡¥Ñ•´¹±¥¹­}É•Í½±ÕÑ¥½¸¥ñð(€€€€„¡¥Ñ•´¹‘¥ÍÁ±…å•‘}ÁÉ¥•}ÑÝôôõ¹Õ±±ñð¡9Õµ‰•È¹¥Í%¹Ñ••È¡¥Ñ•´¹‘¥ÍÁ±…å•‘}ÁÉ¥•}ÑÝ¤˜™¥Ñ•´¹‘¥ÍÁ±…å•‘}ÁÉ¥•}ÑÝøÀ¤¥ñð(€€€€„¡¥Ñ•´¹¡…¹‘½™™}ÁÉ¥•}ÑÝôôõ¹Õ±±ñð¡9Õµ‰•È¹¥Í%¹Ñ••È¡¥Ñ•´¹¡…¹‘½™™}ÁÉ¥•}ÑÝ¤˜™¥Ñ•´¹¡…¹‘½™™}ÁÉ¥•}ÑÝøÀ¤¥ñð(€€€€„¡¥Ñ•´¹¡…¹‘½™™}¡•­•‘}…Ðôôõ¹Õ±±ññÙ…±¥‘Q¥µ”¡¥Ñ•´¹¡…¹‘½™™}¡•­•‘}…Ð¤¤¥É•ÑÕÉ¸™…±Í”ì(€¥˜ ¡¥Ñ•´¹¡…¹‘½™™}ÁÉ¥•}ÑÝôôõ¹Õ±°¤„ôô¡¥Ñ•´¹¡…¹‘½™™}¡•­•‘}…Ðôôõ¹Õ±°¤¥É•ÑÕÉ¸™…±Í”ì(€¥˜¡¥Ñ•´¹¡…¹‘½™™}ÁÉ¥•}ÑÝ„ôõ¹Õ±°˜˜¡¥Ñ•´¹‘¥ÍÁ±…å•‘}ÁÉ¥•}ÑÝôôõ¹Õ±±ññ¥Ñ•´¹±¥¹­}É•Í½±ÕÑ¥½¸„ôôÉ•Í½±Ù•‘}Í…™”œ¤¥É•ÑÕÉ¸™…±Í”ì(€É•ÑÕÉ¸ÑÉÕ”ì)ô()™Õ¹Ñ¥½¸Á•É•¹Ñ¥±”¡Ù…±Õ•Ì±À¥ì(€¥˜ …Ù…±Õ•Ì¹±•¹Ñ ¥É•ÑÕÉ¸¹Õ±°ì(€½¹ÍÐÍ½ÉÑ•õl¸¸¹Ù…±Õ•Ít¹Í½ÉÐ ¡„±ˆ¤ôù„µˆ¤ì(€É•ÑÕÉ¸Í½ÉÑ•‘m5…Ñ ¹•¥°¡À©Í½ÉÑ•¹±•¹Ñ ¤´Åtì)ô)™Õ¹Ñ¥½¸É…Ñ”¡¹Õµ•É…Ñ½È±‘•¹½µ¥¹…Ñ½È¥íÉ•ÑÕÉ¸‘•¹½µ¥¹…Ñ½Èý¹Õµ•É…Ñ½È½‘•¹½µ¥¹…Ñ½Èé¹Õ±°íô)™Õ¹Ñ¥½¸µ…Ñ¡•Ì¡½‰Í•ÉÙ…Ñ¥½¸±­•ä±•áÁ•Ñ•¥ì(€É•ÑÕÉ¸½‰Í•ÉÙ…Ñ¥½¹m­•åt„ôõ¹Õ±°˜™½‰Í•ÉÙ…Ñ¥½¹m­•åt„ôõÕ¹‘•™¥¹•˜™½‰Í•ÉÙ…Ñ¥½¹m­•åtôôõ•áÁ•Ñ•ì)ô()•áÁ½ÉÐ™Õ¹Ñ¥½¸•Ù…±Õ…Ñ•…±¥‰É…Ñ¥½¸¡½‰Í•ÉÙ…Ñ¥½¹Ì±í…ÕÑ¡½É¥é•õ™…±Í”±Ñ•ÉµÍ}…±±½Ý•õ™…±Í”±‰Õ‘•Ñ}…ÁÁÉ½Ù•õ™…±Í”±•Ù…±Õ…Ñ•‘}…Ðõ¹•Ü…Ñ” ¤¹Ñ½%M=MÑÉ¥¹œ ¥ôõíô¥ì(€½¹ÍÐ‰…Í”õíÍ¡•µ…}Ù•ÉÍ¥½¸èÄ±ÁÉ½Ñ½½±}Ù•ÉÍ¥½¸éAI=Q==1}YIM%=8±ÁÉ½Ù¥‘•ÈéAI=Y%H±ÁÉ½Ù¥‘•É}Ù•ÉÍ¥½¸éAI=Y%I}YIM%=8°(€€€‘•¥Í¥½¸è	1=,œ±µ•…ÍÕÉ•‘}…Ðé¹Õ±°±•áÁ¥É•Í}…Ðé¹Õ±°±…±±½Ý•‘}É½ÕÑ•Ìémt±É½ÕÑ•}µ•ÑÉ¥Ìéíô±‰±½­•ÉÌémt°(€€€…ÁÁÉ½Ù…±Ìéí½Ý¹•É}…ÕÑ¡½É¥é•é…ÕÑ¡½É¥é•ôôõÑÉÕ”±Ñ•ÉµÍ}…±±½Ý•éÑ•ÉµÍ}…±±½Ý•ôôõÑÉÕ”±‰Õ‘•Ñ}…ÁÁÉ½Ù•é‰Õ‘•Ñ}…ÁÁÉ½Ù•ôôõÑÉÕ•õôì(€½¹ÍÐ‰±½­•ÈõÉ•…Í½¸ôø¡ì¸¸¹‰…Í”±‰±½­•ÉÌémÉ•…Í½¹uô¤ì(€¥˜¡…ÕÑ¡½É¥é•„ôõÑÉÕ”¥É•ÑÕÉ¸‰±½­•È …ÕÑ¡½É¥é…Ñ¥½¹}µ¥ÍÍ¥¹œœ¤ì(€¥˜¡Ñ•ÉµÍ}…±±½Ý•„ôõÑÉÕ”¥É•ÑÕÉ¸‰±½­•È Ñ•ÉµÍ}Õ¹±•…Èœ¤ì(€¥˜¡‰Õ‘•Ñ}…ÁÁÉ½Ù•„ôõÑÉÕ”¥É•ÑÕÉ¸‰±½­•È ‰Õ‘•Ñ}Õ¹…ÁÁÉ½Ù•œ¤ì(€¥˜ …Ù…±¥‘Q¥µ”¡•Ù…±Õ…Ñ•‘}…Ð¥ñð…ÉÉ…ä¹¥ÍÉÉ…ä¡½‰Í•ÉÙ…Ñ¥½¹Ì¥ññ½‰Í•ÉÙ…Ñ¥½¹Ì¹±•¹Ñ ðÅññ½‰Í•ÉÙ…Ñ¥½¹Ì¹±•¹Ñ øÐáñð(€€€½‰Í•ÉÙ…Ñ¥½¹Ì¹Í½µ”¡¥Ñ•´ôø…Ù…±¥‘…Ñ•=‰Í•ÉÙ…Ñ¥½¸¡¥Ñ•´¤¤¥É•ÑÕÉ¸‰±½­•È ¥¹Ù…±¥‘}½É}Õ¹É•‘…Ñ•‘}½‰Í•ÉÙ…Ñ¥½¸œ¤ì(€¥˜¡½‰Í•ÉÙ…Ñ¥½¹Ì¹Í½µ”¡¥Ñ•´ôù¡…É‘MÑ½Á=ÕÑ½µ•Ì¹¡…Ì¡¥Ñ•´¹½ÕÑ½µ”¥ññ¥Ñ•´¹±¥¹­}É•Í½±ÕÑ¥½¸ôôôÕ¹Í…™”œ¤¥É•ÑÕÉ¸‰±½­•È ÍÑ½Á}ÉÕ±•}ÑÉ¥•É•œ¤ì(€½¹ÍÐÉ½ÕÁ•õ¹•Ü5…À ¤ì(€™½È¡½¹ÍÐ¥Ñ•´½˜½‰Í•ÉÙ…Ñ¥½¹Ì¥ì(€€€¥˜ …É½ÕÁ•¹¡…Ì¡¥Ñ•´¹É½ÕÑ”¤¥É½ÕÁ•¹Í•Ð¡¥Ñ•´¹É½ÕÑ”±mt¤ì(€€€É½ÕÁ•¹•Ð¡¥Ñ•´¹É½ÕÑ”¤¹ÁÕÍ ¡¥Ñ•´¤ì(€ô(€¥˜¡l¸¸¹É½ÕÁ•¹Ù…±Õ•Ì ¥t¹Í½µ”¡¥Ñ•µÌôù¥Ñ•µÌ¹±•¹Ñ ùQ}]%9=]L¹±•¹Ñ¡ñð(€€€¹•ÜM•Ð¡¥Ñ•µÌ¹µ…À¡‘…Ñ•]¥¹‘½Ý…åÌ¤¤¹Í¥é”„ôõ¥Ñ•µÌ¹±•¹Ñ ¤¥É•ÑÕÉ¸‰±½­•È Í…µÁ±•}‰Õ‘•Ñ}•á••‘•œ¤ì(€½¹ÍÐµ•ÑÉ¥Ìõíôì(€™½È¡½¹ÍÐmÉ½ÕÑ”±¥Ñ•µÍt½˜É½ÕÁ•¥ì(€€€½¹ÍÐÍÕ•ÍÍ•Ìõ¥Ñ•µÌ¹™¥±Ñ•È¡¥Ñ•´ôù¥Ñ•´¹½ÕÑ½µ”ôôôMUMLœ¤ì(€€€½¹ÍÐ½µÁ…É…‰±”õÍÕ•ÍÍ•Ì¹™¥±Ñ•È¡¥Ñ•´ôù¥Ñ•´¹¡…¹‘½™™}ÁÉ¥•}ÑÝ„ôõ¹Õ±°¤ì(€€€½¹ÍÐÅÕ½Ñ••ÌõÍÕ•ÍÍ•Ì¹µ…À¡¥Ñ•´ôù¥Ñ•´¹ÅÕ½Ñ•}…•}Í•½¹‘Ì¤¹™¥±Ñ•È¡Ù…±Õ”ôùÙ…±Õ”„ôõ¹Õ±°¤ì(€€€½¹ÍÐ½µÁ…É¥Í½¹Ìõ½µÁ…É…‰±”¹µ…À¡¥Ñ•´ôù5…Ñ ¹…‰Ì¡¥Ñ•´¹¡…¹‘½™™}ÁÉ¥•}ÑÝµ¥Ñ•´¹‘¥ÍÁ±…å•‘}ÁÉ¥•}ÑÝ¤½¥Ñ•´¹‘¥ÍÁ±…å•‘}ÁÉ¥•}ÑÝ¨ÄÀÀ¤ì(€€€½¹ÍÐÁ…ÉÍ•‘•¹½µ¥¹…Ñ½ÈõÍÕ•ÍÍ•Ì¹±•¹Ñ ­¥Ñ•µÌ¹™¥±Ñ•È¡¥Ñ•´ôù¥Ñ•´¹½ÕÑ½µ”ôôôAIM}%1œ¤¹±•¹Ñ ì(€€€½¹ÍÐÁÉ½™¥±”õ¥Ñ•µÍlÁt¹ÁÉ½™¥±”ì(€€€½¹ÍÐµ…Ñ¡•ÍÕÉÉ•¹äõÍÕ•ÍÍ•Ì¹™¥±Ñ•È¡¥Ñ•´ôùµ…Ñ¡•Ì¡¥Ñ•´°½‰Í•ÉÙ•‘}ÕÉÉ•¹äœ°Q]œ¤¤¹±•¹Ñ ì(€€€½¹ÍÐµ…Ñ¡•ÍA…ÍÍ•¹•ÉÌõÍÕ•ÍÍ•Ì¹™¥±Ñ•È¡¥Ñ•´ôùµ…Ñ¡•Ì¡¥Ñ•´°½‰Í•ÉÙ•‘}…‘Õ±ÑÌœ±ÁÉ½™¥±”¹…‘Õ±ÑÌ¤¤¹±•¹Ñ ì(€€€½¹ÍÐµ…Ñ¡•Í…‰¥¸õÍÕ•ÍÍ•Ì¹™¥±Ñ•È¡¥Ñ•´ôùµ…Ñ¡•Ì¡¥Ñ•´°½‰Í•ÉÙ•‘}…‰¥¸œ±ÁÉ½™¥±”¹…‰¥¸¤¤¹±•¹Ñ ì(€€€½¹ÍÐµ…Ñ¡•Í¥É•Ñ¹•ÍÌõÍÕ•ÍÍ•Ì¹™¥±Ñ•È¡¥Ñ•´ôùµ…Ñ¡•Ì¡¥Ñ•´°½‰Í•ÉÙ•‘}‘¥É•Ñ}½¹±äœ±ÁÉ½™¥±”¹‘¥É•Ñ}½¹±ä¤¤¹±•¹Ñ ì(€€€½¹ÍÐÍ…™•1¥¹­ÌõÍÕ•ÍÍ•Ì¹™¥±Ñ•È¡¥Ñ•´ôù¥Ñ•´¹±¥¹­}É•Í½±ÕÑ¥½¸ôôôÉ•Í½±Ù•‘}Í…™”œ¤¹±•¹Ñ ì(€€€µ•ÑÉ¥ÍmÉ½ÕÑ•tõì(€€€€€…ÑÑ•µÁÑ•é¥Ñ•µÌ¹±•¹Ñ ±ÍÕ•ÍÍ™Õ°éÍÕ•ÍÍ•Ì¹±•¹Ñ ±Á…ÉÍ•}½µÁ±•Ñ”éÍÕ•ÍÍ•Ì¹±•¹Ñ °(€€€€€Á…ÉÍ•}Í…µÁ±•}½Õ¹ÐéÁ…ÉÍ•‘•¹½µ¥¹…Ñ½È°(€€€€€‘…Ñ•}Ý¥¹‘½ÝÌél¸¸¹¹•ÜM•Ð¡¥Ñ•µÌ¹µ…À¡‘…Ñ•]¥¹‘½Ý…åÌ¤¥t¹Í½ÉÐ ¡„±ˆ¤ôù„µˆ¤°(€€€€€ÅÕ½Ñ•}…•}Í…µÁ±•}½Õ¹ÐéÅÕ½Ñ••Ì¹±•¹Ñ °(€€€€€ÕÉÉ•¹å}µ…Ñ¡}½Õ¹Ðéµ…Ñ¡•ÍÕÉÉ•¹ä±Á…ÍÍ•¹•É}µ…Ñ¡}½Õ¹Ðéµ…Ñ¡•ÍA…ÍÍ•¹•ÉÌ±…‰¥¹}µ…Ñ¡}½Õ¹Ðéµ…Ñ¡•Í…‰¥¸°(€€€€€‘¥É•Ñ¹•ÍÍ}µ…Ñ¡}½Õ¹Ðéµ…Ñ¡•Í¥É•Ñ¹•ÍÌ±Í…™•}±¥¹­}É•Í½±Ù•‘}½Õ¹ÐéÍ…™•1¥¹­Ì°(€€€€€Í•…É¡}ÍÕ•ÍÍ}É…Ñ”éÉ…Ñ”¡ÍÕ•ÍÍ•Ì¹±•¹Ñ ±¥Ñ•µÌ¹±•¹Ñ ¤°(€€€€€Á…ÉÍ•}½µÁ±•Ñ•¹•ÍÍ}É…Ñ”éÉ…Ñ”¡ÍÕ•ÍÍ•Ì¹±•¹Ñ ±Á…ÉÍ•‘•¹½µ¥¹…Ñ½È¤°(€€€€€ÅÕ½Ñ•}…•}ÀäÕ}Í•½¹‘ÌéÁ•É•¹Ñ¥±”¡ÅÕ½Ñ••Ì°¸äÔ¤°(€€€€€ÕÉÉ•¹å}½¹Í¥ÍÑ•¹å}É…Ñ”éÉ…Ñ”¡µ…Ñ¡•ÍÕÉÉ•¹ä±ÍÕ•ÍÍ•Ì¹±•¹Ñ ¤°(€€€€€Á…ÍÍ•¹•É}½¹Í¥ÍÑ•¹å}É…Ñ”éÉ…Ñ”¡µ…Ñ¡•ÍA…ÍÍ•¹•ÉÌ±ÍÕ•ÍÍ•Ì¹±•¹Ñ ¤°(€€€€€…‰¥¹}½¹Í¥ÍÑ•¹å}É…Ñ”éÉ…Ñ”¡µ…Ñ¡•Í…‰¥¸±ÍÕ•ÍÍ•Ì¹±•¹Ñ ¤°(€€€€€‘¥É•Ñ¹•ÍÍ}½¹Í¥ÍÑ•¹å}É…Ñ”éÉ…Ñ”¡µ…Ñ¡•Í¥É•Ñ¹•ÍÌ±ÍÕ•ÍÍ•Ì¹±•¹Ñ ¤°(€€€€€Í…™•}±¥¹­}É•Í½±ÕÑ¥½¹}É…Ñ”éÉ…Ñ”¡Í…™•1¥¹­Ì±ÍÕ•ÍÍ•Ì¹±•¹Ñ ¤°(€€€€€¡…¹‘½™™}½µÁ…É¥Í½¹}½Õ¹Ðé½µÁ…É…‰±”¹±•¹Ñ °(€€€€€ÁÉ¥•}‘¥ÍÉ•Á…¹å}ÀäÕ}Á•É•¹ÐéÁ•É•¹Ñ¥±”¡½µÁ…É¥Í½¹Ì°¸äÔ¤°(€€€ôì(€ô(€½¹ÍÐ…±±½Ý•õI=UQ}-eL¹™¥±Ñ•È¡É½ÕÑ”ôùµ•ÑÉ¥ÍmÉ½ÕÑ•t˜™É½ÕÑ•5•ÑÉ¥A…ÍÌ¡µ•ÑÉ¥ÍmÉ½ÕÑ•t¤¤ì(€¥˜ ……±±½Ý•¹±•¹Ñ ¥É•ÑÕÉ¸ì¸¸¹‰…Í”±É½ÕÑ•}µ•ÑÉ¥Ìéµ•ÑÉ¥Ì±‰±½­•ÉÌél¹½}É½ÕÑ•}µ••ÑÍ}ÁÉ•‘•±…É•‘}Ñ¡É•Í¡½±‘Ìuôì(€½¹ÍÐ‘•¥Í¥½¸õ…±±½Ý•¹±•¹Ñ ôôõI=UQ}-eL¹±•¹Ñ ü	U%1œè9II=\œì(€½¹ÍÐµ•…ÍÕÉ•‘Ðõ¹•Ü…Ñ”¡…Ñ”¹Á…ÉÍ”¡•Ù…±Õ…Ñ•‘}…Ð¤¤¹Ñ½%M=MÑÉ¥¹œ ¤ì(€É•ÑÕÉ¸ì¸¸¹‰…Í”±‘•¥Í¥½¸±µ•…ÍÕÉ•‘}…Ðéµ•…ÍÕÉ•‘Ð°(€€€•áÁ¥É•Í}…Ðé¹•Ü…Ñ”¡…Ñ”¹Á…ÉÍ”¡µ•…ÍÕÉ•‘Ð¤­Q!IM!=1L¹µ…á¥µÕµI••¥ÁÑ•5Ì¤¹Ñ½%M=MÑÉ¥¹œ ¤°(€€€…±±½Ý•‘}É½ÕÑ•Ìé…±±½Ý•±É½ÕÑ•}µ•ÑÉ¥Ìéµ•ÑÉ¥Ì±‰±½­•ÉÌémuôì)ô()•áÁ½ÉÐ™Õ¹Ñ¥½¸½±±•Ñ½É‘µ¥ÍÍ¥½¸¡•¹Ø±¹½Üõ…Ñ”¹¹½Ü ¤¥ì(€¥˜¡•¹Ø¹=11Q=I}9	1„ôôÑÉÕ”œ¥É•ÑÕÉ¸í…‘µ¥ÑÑ•é™…±Í”±ÍÑ…Ñ”è‘¥Í…‰±•œ±É•…Í½¸è½±±•Ñ½É}‘¥Í…‰±•œ°(€€€‘•¥Í¥½¸é¥¹ÍÁ•Ñ‘µ¥ÍÍ¥½¸¡•¹Ø¹1%	IQ%=9}5%MM%=8±¹½Ü¤¹‘•¥Í¥½¸±…±±½Ý•‘}É½ÕÑ•Ìémuôì(€É•ÑÕÉ¸¥¹ÍÁ•Ñ‘µ¥ÍÍ¥½¸¡•¹Ø¹1%	IQ%=9}5%MM%=8±¹½Ü¤ì)ô

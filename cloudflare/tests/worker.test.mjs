@@ -126,6 +126,32 @@ for(const outcome of ['empty','error']){
   test(`${outcome} creates no snapshot, retains last known fare`,async t=>{const r=rig(t);const [dbTask]=await r.seed();r.snapshot(dbTask,8000,r.clock.now-3600000);const task=await r.claim();const v=await r.request('/api/collector/result',{role:'collector',data:{task_id:task.id,lease_token:task.lease_token,outcome}});assert.equal(v.status,200);const q=(await r.request('/api/ui/quotes')).body.quotes;assert.equal(q[0].price_twd,8000);assert.equal((await r.request('/api/ui/config')).body.search_snapshots,1);assert(r.db.sqlite.prepare('SELECT next_run FROM cf_radar_tasks').get().next_run>r.clock.now);});
 }
 test('non-success cannot smuggle a price',async t=>{const r=rig(t);await r.seed();const task=await r.claim();assert.equal((await r.complete(task,{outcome:'error'})).status,422);});
+test('typed failures are restricted, idempotent, and retained per task',async t=>{
+  const r=rig(t);await r.seed();const task=await r.claim();
+  const body={task_id:task.id,lease_token:task.lease_token,outcome:'error',error_type:'RATE_LIMITED'};
+  assert.equal((await r.request('/api/collector/result',{role:'collector',data:body})).status,200);
+  assert.equal((await r.request('/api/collector/result',{role:'collector',data:body})).body.replayed,true);
+  assert.equal((await r.request('/api/collector/result',{role:'collector',data:{...body,error_type:'BLOCKED'}})).status,409);
+  assert.equal(r.db.sqlite.prepare('SELECT last_outcome FROM cf_radar_tasks').get().last_outcome,'error:RATE_LIMITED');
+  assert.equal(r.db.sqlite.prepare('SELECT outcome FROM cf_radar_receipts').get().outcome,'error');
+  assert.equal((await r.request('/api/collector/result',{role:'collector',data:{...body,error_type:'raw upstream body'}})).status,422);
+});
+test('batch reports retain only bounded sanitized error-type counts',async t=>{
+  const r=rig(t);const report={run_id:UUID(),attempted:2,observed:1,errors:1,error_types:{RATE_LIMITED:1}};
+  assert.equal((await r.request('/api/collector/report',{role:'collector',data:report})).status,200);
+  const worker=(await r.request('/api/ui/config')).body.worker;
+  assert.deepEqual(worker.error_types,{RATE_LIMITED:1});assert.equal(worker.source_health.reason,'batch_partial');
+  assert.equal((await r.request('/api/collector/report',{role:'collector',data:{...report,error_types:{UNKNOWN:2}}})).status,422);
+  assert.equal((await r.request('/api/collector/report',{role:'collector',data:{...report,error_types:{'raw upstream body':1}}})).status,422);
+  assert(!JSON.stringify((await r.request('/api/ui/config')).body).includes('raw upstream body'));
+});
+test('legacy error receipts and reports default to UNKNOWN',async t=>{
+  const r=rig(t);await r.seed();const task=await r.claim();
+  assert.equal((await r.request('/api/collector/result',{role:'collector',data:{task_id:task.id,lease_token:task.lease_token,outcome:'error'}})).status,200);
+  assert.equal(r.db.sqlite.prepare('SELECT last_outcome FROM cf_radar_tasks').get().last_outcome,'error:UNKNOWN');
+  await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:1,observed:0,errors:1}});
+  assert.deepEqual((await r.request('/api/ui/config')).body.worker.error_types,{UNKNOWN:1});
+});
 test('future observation rejected',async t=>{const r=rig(t);await r.seed();const task=await r.claim();assert.equal((await r.complete(task,{searched_at:new Date(r.clock.now+60000).toISOString()})).status,422);});
 test('old timestamp outside lease rejected',async t=>{const r=rig(t);await r.seed();const task=await r.claim();assert.equal((await r.complete(task,{searched_at:new Date(r.clock.now-DAY).toISOString()})).status,422);});
 test('current batch is excluded from five-day price comparison',async t=>{const r=rig(t);const [dbTask]=await r.seed();for(let d=1;d<=5;d++)r.snapshot(dbTask,8000,r.clock.now-d*DAY);const task=await r.claim();await r.complete(task);const q=(await r.request('/api/ui/quotes')).body.quotes[0];assert.equal(q.baseline_twd,8000);assert.equal(q.prior_observed_days,5);assert.equal(q.drop_pct,25.3);});

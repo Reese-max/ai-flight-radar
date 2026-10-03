@@ -1,5 +1,5 @@
 """Additive tables: existing flight records and schema are not rewritten."""
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 from sqlmodel import Field, SQLModel
@@ -21,7 +21,7 @@ class SearchSnapshot(SQLModel, table=True):
     direct_only: bool = True
     adults: int = 1
     cabin: str = "economy"
-    searched_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    searched_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 
 class TaskLease(SQLModel, table=True):
@@ -34,4 +34,4 @@ class TaskLease(SQLModel, table=True):
 class RadarMigration(SQLModel, table=True):
     __tablename__ = "radar_migrations"
     name: str = Field(primary_key=True)
-    applied_at: datetime = Field(default_factory=datetime.utcnow)
+    applied_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

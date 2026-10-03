@@ -7,13 +7,13 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from types import SimpleNamespace
+from types import ModuleType,SimpleNamespace
 import unittest
 from unittest.mock import patch
 import uuid
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from collector import Client,NoRedirect,SafeFailure,run_batch,validated_origin,validate_task,search_subprocess
+from collector import AdmissionBlocked,Client,NoRedirect,SafeFailure,classify_failure,run_batch,validated_origin,validate_task,search_subprocess
 from search_once import normalize
 from tasks import plan
 
@@ -52,13 +52,14 @@ class CollectorTests(unittest.TestCase):
     def test_single_search_helper_stops_before_provider_when_calibration_blocks(self):
         import collector
         import search_once
-        import providers.selector as provider_selector
+        provider_selector=ModuleType('providers.selector')
+        provider_selector.get_provider=lambda:self.fail('provider must not run')
         out=io.StringIO()
         with patch.object(sys,'stdin',io.StringIO(json.dumps(task()))),patch.object(sys,'stdout',out),\
-            patch('collector.require_calibration_admission',side_effect=SafeFailure('blocked')),\
-            patch.object(provider_selector,'get_provider',side_effect=AssertionError('provider must not run')):
+            patch('collector.require_calibration_admission',side_effect=AdmissionBlocked('blocked')),\
+            patch.dict(sys.modules,{'providers.selector':provider_selector}):
             search_once.main()
-        self.assertEqual(json.loads(out.getvalue()),{'outcome':'error'})
+        self.assertEqual(json.loads(out.getvalue()),{'outcome':'error','error_type':'BLOCKED'})
     def test_https_only(self):
         with self.assertRaises(SafeFailure):validated_origin('http://radar.example')
     def test_no_credentials_in_url(self):
@@ -86,6 +87,30 @@ class CollectorTests(unittest.TestCase):
     def test_provider_error_stops_remaining_tasks(self):
         c=FakeClient([task(),task()]);summary=run_batch(c,lambda _: {'outcome':'error'},pause=lambda _:None)
         self.assertEqual(summary['attempted'],1);self.assertEqual(summary['errors'],1)
+        self.assertEqual(summary['error_types'],{'UNKNOWN':1})
+        posted=[body for p,body in c.calls if p.endswith('/result')][0]
+        self.assertEqual(posted['error_type'],'UNKNOWN')
+
+    def test_typed_provider_failure_is_sanitized_and_reported(self):
+        error=RuntimeError('secret upstream body');error.status_code=429
+        c=FakeClient([task()]);summary=run_batch(c,lambda _:(_ for _ in ()).throw(error),pause=lambda _:None)
+        posted=[body for p,body in c.calls if p.endswith('/result')][0]
+        report=[body for p,body in c.calls if p.endswith('/report')][0]
+        self.assertEqual(posted['error_type'],'RATE_LIMITED')
+        self.assertEqual(report['error_types'],{'RATE_LIMITED':1})
+        self.assertNotIn('secret upstream body',json.dumps([posted,report,summary]))
+
+    def test_failure_classifier_maps_statuses_without_reading_error_text(self):
+        for status,expected in [(429,'RATE_LIMITED'),(403,'BLOCKED'),(404,'UPSTREAM_CHANGED'),(503,'SOURCE_UNAVAILABLE')]:
+            error=RuntimeError('raw provider response');error.status_code=status
+            with self.subTest(status=status):self.assertEqual(classify_failure(error),expected)
+
+    def test_invalid_error_metadata_is_reduced_to_unknown_enum(self):
+        c=FakeClient([task()]);summary=run_batch(c,lambda _:{'outcome':'error','error_type':['secret'],'response':'raw body'},pause=lambda _:None)
+        posted=[body for p,body in c.calls if p.endswith('/result')][0]
+        self.assertEqual(posted['error_type'],'UNKNOWN')
+        self.assertEqual(set(posted),{'outcome','error_type','task_id','lease_token'})
+        self.assertNotIn('raw body',json.dumps(summary))
     def test_provider_cannot_override_task_lease(self):
         original=task();c=FakeClient([original]);run_batch(c,lambda _: {'outcome':'empty','task_id':'evil','lease_token':'evil'},max_tasks=1)
         posted=[body for p,body in c.calls if p.endswith('/result')][0]
@@ -94,7 +119,7 @@ class CollectorTests(unittest.TestCase):
         with self.assertRaises(SafeFailure):validate_task(task()|{'destination':'XXX'})
     def test_timeout_becomes_error_and_no_raw_trace(self):
         with patch('subprocess.run',side_effect=subprocess.TimeoutExpired('test',90)):
-            self.assertEqual(search_subprocess(task()),{'outcome':'error'})
+            self.assertEqual(search_subprocess(task()),{'outcome':'error','error_type':'TIMEOUT'})
     def test_child_does_not_receive_application_or_github_secrets(self):
         captured={}
         def fake(*a,**k):captured.update(k);return SimpleNamespace(returncode=0,stdout='{"outcome":"empty"}')
@@ -105,9 +130,9 @@ class CollectorTests(unittest.TestCase):
         result=normalize([offer(9000),offer(5000)],task())
         self.assertEqual(result['price_twd'],5000);self.assertEqual(result['offer_count'],2)
     def test_zero_and_boolean_fares_rejected(self):
-        self.assertEqual(normalize([offer(0),offer(True)],task()),{'outcome':'error'})
+        self.assertEqual(normalize([offer(0),offer(True)],task()),{'outcome':'error','error_type':'PARSE_FAILED'})
     def test_wrong_trip_or_dates_not_saved(self):
-        self.assertEqual(normalize([offer(trip_type='one-way'),offer(return_date='2026-11-17')],task()),{'outcome':'error'})
+        self.assertEqual(normalize([offer(trip_type='one-way'),offer(return_date='2026-11-17')],task()),{'outcome':'error','error_type':'PARSE_FAILED'})
     def test_empty_provider_list_is_empty_not_error_or_free(self):
         self.assertEqual(normalize([],task()),{'outcome':'empty'})
     def test_bad_airline_is_unknown_not_invented(self):

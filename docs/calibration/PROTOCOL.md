@@ -38,6 +38,7 @@ The committed cloudflare/calibration/admission.json contains only the current de
 
 - available: a current receipt admits the route and the latest batch has successful observations, no errors, and is less than 3 hours old.
 - partial: the latest batch is less than 3 hours old and has both successful observations and errors.
+- Error receipts keep only a typed class (`RATE_LIMITED`, `UPSTREAM_CHANGED`, `PARSE_FAILED`, `TIMEOUT`, `BLOCKED`, `SOURCE_UNAVAILABLE`, or `UNKNOWN`); batch reports expose bounded counts for those classes. Exception text, URLs, response bodies, and upstream HTML are never persisted or shown.
 - stale: the latest batch is over 3 hours old or has an invalid future timestamp. Its prices must be rechecked at the source.
 - unavailable: no successful observation exists, the latest batch is empty or failed, or calibration is blocked, invalid, or expired. This is not the same as NO_RESULTS.
 
