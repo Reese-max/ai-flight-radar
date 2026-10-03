@@ -32,8 +32,25 @@ installed.
 2. `diff -r <upstream>/fli third_party/fli/fli` — review what changed.
 3. Replace `third_party/fli/fli/` wholesale; copy upstream `LICENSE.txt` again.
 4. Update `upstream_commit` / `last_upstream_reviewed_at` above.
-5. Re-run `pytest tests/test_fli_provider.py` plus one bounded live search
-   (`RADAR_PRIMARY_PROVIDER=fli`) before flipping the primary provider.
+5. Re-run `pytest tests/test_fli_provider.py tests/test_fli_flexible.py` plus one bounded
+   live search (`RADAR_PRIMARY_PROVIDER=fli`) before flipping the primary provider.
+
+## Phase 2 additions (locally authored)
+
+- `providers/fli_custom/provider.py`: `search(...)` now maps `cabin`
+  (`ECONOMY|PREMIUM_ECONOMY|BUSINESS|FIRST`), `adults`, and IATA `airlines`
+  into the vendored filter object; invalid values fail before any upstream call.
+- `providers/fli_custom/dates.py`: bounded flexible-date search over
+  `SearchDates` — span capped at `MAX_SPAN_DAYS = 61`, positive trip duration
+  required, results validated/sorted/capped at 50, upstream failures typed as
+  `FliProviderError` (never conflated with empty results).
+- `providers/fli_custom/plan.py`: `bound_route_matrix` caps origin×destination
+  fan-out at 8 pairs by default.
+- `providers/selector.py`: `get_provider_chain()` honors
+  `RADAR_PRIMARY_PROVIDER` / `RADAR_FALLBACK_PROVIDER`; default remains
+  `fast_flights` only until live calibration passes.
+- `cloudflare/scripts/calibrate_fli.py`: bounded live calibration command;
+  receipts land in `docs/calibration/` (e.g. `2026-10-03.json`).
 
 Do not edit files inside `third_party/fli/fli/` — fork-style patches go in
 `providers/fli_custom/` or a dedicated patch file documented here.
