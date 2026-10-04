@@ -11,7 +11,7 @@ The planned maximum is 48 searches: exactly one attempt for each of the 16 route
 
 The product cannot currently express one-way trips, multiple passengers, other cabins, or connecting flights through the Cloudflare collector. Those profiles are out of scope and must be marked BLOCKED without querying. Baggage and final fees remain unknown and must not be inferred from an economy/direct result.
 
-The 48-attempt ceiling gives three independent date-window observations per configured route. A route can be admitted only with at least three successful, parse-complete observations and three manual handoff comparisons. If some routes pass, produce NARROW with only those routes. BUILD requires all 16 configured routes to pass. If no route passes, or authorization/terms/budget is absent, the decision is BLOCK.
+The 48-attempt ceiling covers the full matrix of 16 configured routes and three distinct date windows, with one attempt per route/window. This is a bounded screening design chosen to check route and date-window coverage, not a probability sample for estimating long-run source reliability. A route can be admitted only with all three attempts successful and parse-complete, plus three manual handoff comparisons. With only three attempts per route, this means 3/3 successes; the general 90% floor is not an estimate of population performance. Do not extrapolate this receipt to unsupported passenger, cabin, or itinerary profiles. Any broader reliability claim requires a separately approved larger sample. If some routes pass, produce NARROW with only those routes. BUILD requires all 16 configured routes to pass. If no route passes, or authorization/terms/budget is absent, the decision is BLOCK.
 
 ## Recorded evidence and thresholds
 
