@@ -23,6 +23,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[2]
 ORIGINS = {'TPE', 'TSA', 'KHH', 'RMQ'}
 DESTINATIONS = {'NRT','HND','KIX','FUK','KMJ','KOJ','OKA','NGO','CTS','SDJ','OKJ','TAK'}
+SEARCH_PROVIDERS = {'fast_flights', 'fli', 'fli_custom'}
 
 class SafeFailure(RuntimeError):
     """A deliberately sanitized message suitable for CI logs."""
@@ -112,8 +113,15 @@ def search_subprocess(task: dict) -> dict:
     # locate under a stripped env; hand the child the resolved site dirs instead.
     extra = [p for p in (*site.getsitepackages(), site.getusersitepackages()) if p and os.path.isdir(p)]
     child_env['PYTHONPATH'] = os.pathsep.join(dict.fromkeys(extra))
+    primary = (os.environ.get('RADAR_PRIMARY_PROVIDER') or 'fast_flights').strip().lower()
+    primary = primary or 'fast_flights'
+    fallback = os.environ.get('RADAR_FALLBACK_PROVIDER', '').strip().lower()
+    if primary not in SEARCH_PROVIDERS or (fallback and fallback not in SEARCH_PROVIDERS):
+        raise SafeFailure('Invalid search provider configuration')
     child_env.update(NTFY_ENABLED='false',TELEGRAM_ENABLED='false',PYTHON_DOTENV_DISABLED='1',
-                     RADAR_PRIMARY_PROVIDER=os.environ.get('RADAR_PRIMARY_PROVIDER','fast_flights'))
+                     RADAR_PRIMARY_PROVIDER=primary)
+    if fallback:
+        child_env['RADAR_FALLBACK_PROVIDER'] = fallback
     try:
         result = subprocess.run([sys.executable,str(Path(__file__).with_name('search_once.py'))],
             input=json.dumps(task),text=True,capture_output=True,timeout=90,env=child_env,cwd=ROOT,check=False)

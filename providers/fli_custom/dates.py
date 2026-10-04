@@ -8,20 +8,21 @@ and the collector task budget stays authoritative. Locally authored.
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import date as Date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import List, Optional
 
 from pydantic import BaseModel
 
-from providers.fli_custom.errors import FliProviderError
+from providers.fli_custom.errors import FliProviderError, FliSearchError
 from providers.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
 
 MAX_SPAN_DAYS = 61
 MAX_RESULTS = 50
+MAX_TRIP_DURATION_DAYS = 30
 
 
 class FlexibleDatePrice(BaseModel):
@@ -57,7 +58,8 @@ def _fetch_dates(filters):
         filters, currency="TWD", language="zh-TW", country="TW")
 
 
-def _normalize_row(row, origin: str, destination: str) -> FlexibleDatePrice:
+def _normalize_row(row, origin: str, destination: str, start: Date, end: Date,
+                   trip_duration_days: Optional[int]) -> FlexibleDatePrice:
     raw_price = getattr(row, "price", None)
     if raw_price is None:
         raise ValueError("price missing")
@@ -67,25 +69,45 @@ def _normalize_row(row, origin: str, destination: str) -> FlexibleDatePrice:
     price = int(numeric.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     if price < 1:
         raise ValueError("Price rounds below one TWD")
-    date = getattr(row, "date", None)
-    if not date:
-        raise ValueError("date missing")
-    depart = date[0].strftime("%Y-%m-%d") if hasattr(date[0], "strftime") else str(date[0])[:10]
-    ret = None
-    if len(date) > 1:
-        ret = date[1].strftime("%Y-%m-%d") if hasattr(date[1], "strftime") else str(date[1])[:10]
+    dates = getattr(row, "date", None)
+    expected_dates = 2 if trip_duration_days is not None else 1
+    if not isinstance(dates, (tuple, list)) or len(dates) != expected_dates:
+        raise ValueError("date shape does not match requested trip type")
+    if any(not isinstance(value, (Date, datetime)) for value in dates):
+        raise ValueError("date value is not a parsed date")
+    depart_date = dates[0].date() if isinstance(dates[0], datetime) else dates[0]
+    if depart_date < start or depart_date > end:
+        raise ValueError("departure date is outside requested range")
+    return_date = None
+    if trip_duration_days is not None:
+        return_date = dates[1].date() if isinstance(dates[1], datetime) else dates[1]
+        if (return_date - depart_date).days != trip_duration_days:
+            raise ValueError("return date does not match requested trip duration")
+    currency = getattr(row, "currency", None)
+    if currency is not None and (not isinstance(currency, str) or currency.upper() != "TWD"):
+        raise ValueError("price currency does not match TWD request")
     return FlexibleDatePrice(origin=origin, destination=destination,
-                             depart_date=depart, return_date=ret,
+                             depart_date=depart_date.isoformat(),
+                             return_date=return_date.isoformat() if return_date else None,
                              price_twd=price,
-                             currency=getattr(row, "currency", None))
+                             currency=currency)
+
+
+def _validate_limit(value: int, hard_max: int, name: str) -> int:
+    if type(value) is not int or not 1 <= value <= hard_max:
+        raise FliProviderError(f"{name} must be between 1 and {hard_max}")
+    return value
 
 
 def search_flexible_dates(origin: str, destination: str, from_date: str,
                           to_date: str, trip_duration_days: Optional[int] = None,
                           max_stops: int = 0, cabin: str = "ECONOMY",
                           adults: int = 1, max_span_days: int = MAX_SPAN_DAYS,
-                          max_results: int = MAX_RESULTS
+                          max_results: int = MAX_RESULTS,
+                          airlines: Optional[List[str]] = None,
                           ) -> List[FlexibleDatePrice]:
+    max_span_days = _validate_limit(max_span_days, MAX_SPAN_DAYS, "max_span_days")
+    max_results = _validate_limit(max_results, MAX_RESULTS, "max_results")
     try:
         start = datetime.strptime(from_date, "%Y-%m-%d")
         end = datetime.strptime(to_date, "%Y-%m-%d")
@@ -97,17 +119,36 @@ def search_flexible_dates(origin: str, destination: str, from_date: str,
     if span > max_span_days:
         raise FliProviderError(
             f"Flexible-date span {span}d exceeds budget of {max_span_days}d")
-    if trip_duration_days is not None and trip_duration_days < 1:
-        raise FliProviderError("trip_duration_days must be positive")
-    if not isinstance(adults, int) or adults < 1:
+    if trip_duration_days is not None and (
+        type(trip_duration_days) is not int
+        or not 1 <= trip_duration_days <= MAX_TRIP_DURATION_DAYS
+    ):
+        raise FliProviderError(
+            f"trip_duration_days must be between 1 and {MAX_TRIP_DURATION_DAYS}"
+        )
+    if type(max_stops) is not int or max_stops not in (0, 1, 2):
+        raise FliProviderError("max_stops must be between 0 and 2")
+    if type(adults) is not int or adults < 1:
         raise FliProviderError("adults must be a positive integer")
 
-    (Airport, DateSearchFilters, _segment, MaxStops,
-     PassengerInfo, SeatType, _triptype, _search) = _load_dates_engine()
     try:
+        (Airport, DateSearchFilters, _segment, MaxStops,
+         PassengerInfo, SeatType, _triptype, _search) = _load_dates_engine()
+    except (ImportError, OSError) as exc:
+        raise FliSearchError(
+            f"Fli date search engine unavailable ({type(exc).__name__})"
+        ) from exc
+    try:
+        from fli.models import Airline
         seat = SeatType[cabin.strip().upper()]
-        stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER}.get(
-            max_stops, MaxStops.TWO_OR_FEWER_STOPS)
+        stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER,
+                 2: MaxStops.TWO_OR_FEWER_STOPS}[max_stops]
+        mapped_airlines = None
+        if airlines is not None:
+            try:
+                mapped_airlines = [Airline[code.strip().upper()] for code in airlines]
+            except (AttributeError, KeyError) as exc:
+                raise ValueError("Unknown airline code") from exc
         round_trip = trip_duration_days is not None
         from fli.core.builders import build_date_search_segments
         segments, trip_type = build_date_search_segments(
@@ -119,7 +160,7 @@ def search_flexible_dates(origin: str, destination: str, from_date: str,
             trip_type=trip_type,
             passenger_info=PassengerInfo(adults=adults),
             flight_segments=segments, stops=stops, seat_type=seat,
-            from_date=from_date, to_date=to_date,
+            airlines=mapped_airlines, from_date=from_date, to_date=to_date,
             duration=trip_duration_days if round_trip else None)
     except (KeyError, ValueError, TypeError) as exc:
         raise FliProviderError(f"Cannot build date filters: {type(exc).__name__}") from exc
@@ -129,7 +170,7 @@ def search_flexible_dates(origin: str, destination: str, from_date: str,
         raw = _fetch_dates(filters)
     except Exception as exc:
         rate_limiter.record_error()
-        raise FliProviderError(
+        raise FliSearchError(
             f"Upstream date search failed ({type(exc).__name__})") from exc
 
     if not raw:
@@ -138,11 +179,12 @@ def search_flexible_dates(origin: str, destination: str, from_date: str,
     rows = []
     for row in raw:
         try:
-            rows.append(_normalize_row(row, origin, destination))
+            rows.append(_normalize_row(row, origin, destination, start.date(), end.date(),
+                                       trip_duration_days))
         except (AttributeError, TypeError, ValueError, InvalidOperation) as exc:
             logger.warning("Rejected malformed date row: %s", type(exc).__name__)
     if not rows:
         rate_limiter.record_error()
-        raise FliProviderError("Upstream returned dates, but none validated")
+        raise FliSearchError("Upstream returned dates, but none validated")
     rate_limiter.record_success()
     return sorted(rows, key=lambda r: r.price_twd)[:max_results]

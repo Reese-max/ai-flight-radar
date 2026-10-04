@@ -41,16 +41,35 @@ installed.
   (`ECONOMY|PREMIUM_ECONOMY|BUSINESS|FIRST`), `adults`, and IATA `airlines`
   into the vendored filter object; invalid values fail before any upstream call.
 - `providers/fli_custom/dates.py`: bounded flexible-date search over
-  `SearchDates` — span capped at `MAX_SPAN_DAYS = 61`, positive trip duration
-  required, results validated/sorted/capped at 50, upstream failures typed as
-  `FliProviderError` (never conflated with empty results).
-- `providers/fli_custom/plan.py`: `bound_route_matrix` caps origin×destination
-  fan-out at 8 pairs by default.
-- `providers/selector.py`: `get_provider_chain()` honors
-  `RADAR_PRIMARY_PROVIDER` / `RADAR_FALLBACK_PROVIDER`; default remains
-  `fast_flights` only until live calibration passes.
+  `SearchDates`. The query range has a hard 61-day ceiling, one round-trip
+  duration is limited to 1–30 days, and callers cannot raise the 50-result
+  ceiling. Returned dates, duration, and TWD currency are validated before a
+  result is exposed. Typed upstream failures remain distinct from an empty
+  successful search.
+- `providers/fli_custom/plan.py`: `bound_route_matrix` enforces a hard 8-pair
+  ceiling before building the Cartesian product.
+- `providers/selector.py`: `search_with_provider_chain()` uses the configured
+  `RADAR_PRIMARY_PROVIDER` and optional `RADAR_FALLBACK_PROVIDER`. It tries
+  fallback only after a typed engine/upstream failure; validation and
+  configuration errors propagate without retrying another provider, and a
+  successful empty result stops the chain. The collector passes only these
+  allowlisted, non-secret settings to its isolated search subprocess. The production default remains
+  `fast_flights` until runtime calibration passes.
 - `cloudflare/scripts/calibrate_fli.py`: bounded live calibration command;
   receipts land in `docs/calibration/` (e.g. `2026-10-03.json`).
+
+## Calibration status: partial, not an acceptance pass
+
+The existing `docs/calibration/2026-10-03.json` records three successful
+observations: TPE–NRT round-trip, TPE–KIX one-way, and KHH–FUK round-trip. It is
+useful preliminary evidence only. It has no TSA or RMQ origin, Okinawa or
+Sapporo destination, repeated-date sample, or no-results case. The receipt also
+does not record the requested/returned travel dates, parsed directness/stops,
+or booking handoff evidence needed to validate those acceptance dimensions.
+No additional live provider requests were made for this change. The issue's
+representative-route, multiple-date, no-result, and response-correctness
+calibration gates remain open, so this receipt does not authorize a production
+provider switch.
 
 Do not edit files inside `third_party/fli/fli/` — fork-style patches go in
 `providers/fli_custom/` or a dedicated patch file documented here.

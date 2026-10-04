@@ -31,6 +31,21 @@ def _no_rate_sleep(monkeypatch):
     monkeypatch.setattr(rate_limiter, "wait", lambda: None)
 
 
+@pytest.fixture(autouse=True)
+def _offline_vendored_models(monkeypatch):
+    """Use real Fli filter models without importing its HTTP client."""
+    from providers.fli_custom import provider
+
+    provider._ensure_fli_path()
+    from fli.models import (Airport, FlightSearchFilters, FlightSegment,
+                            MaxStops, PassengerInfo, SeatType, TripType)
+
+    monkeypatch.setattr(provider, "_load_engine", lambda: (
+        Airport, FlightSearchFilters, FlightSegment, MaxStops, PassengerInfo,
+        SeatType, TripType, object,
+    ))
+
+
 def test_round_trip_tuple_maps_to_direct_offer(monkeypatch):
     p = FliCustomProvider()
     dep = (datetime.utcnow().date() + timedelta(days=50)).isoformat()

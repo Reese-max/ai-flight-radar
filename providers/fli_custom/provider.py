@@ -14,7 +14,7 @@ from typing import List, Optional
 from config.settings import settings
 from providers.base import BaseFlightProvider, StandardFlightOffer
 from providers.rate_limiter import rate_limiter
-from providers.fli_custom.errors import FliProviderError
+from providers.fli_custom.errors import FliProviderError, FliSearchError
 from providers.fli_custom import mapper
 
 logger = logging.getLogger(__name__)
@@ -94,6 +94,10 @@ class FliCustomProvider(BaseFlightProvider):
                 passenger_info=PassengerInfo(adults=adults),
                 flight_segments=segments, stops=stops, seat_type=seat,
                 airlines=mapped_airlines)
+        except (ImportError, OSError) as exc:
+            raise FliSearchError(
+                f"Fli search engine unavailable ({type(exc).__name__})"
+            ) from exc
         except (KeyError, ValueError, TypeError) as exc:
             raise FliProviderError(f"Cannot build search filters: {type(exc).__name__}") from exc
 
@@ -102,7 +106,7 @@ class FliCustomProvider(BaseFlightProvider):
             raw = self._fetch(filters)
         except Exception as exc:
             rate_limiter.record_error()
-            raise FliProviderError(
+            raise FliSearchError(
                 f"Upstream search failed ({type(exc).__name__}); no price observation recorded"
             ) from exc
 
@@ -122,6 +126,6 @@ class FliCustomProvider(BaseFlightProvider):
                 logger.warning("Rejected malformed Fli result: %s", type(exc).__name__)
         if not offers:
             rate_limiter.record_error()
-            raise FliProviderError("Upstream returned results, but none could be validated")
+            raise FliSearchError("Upstream returned results, but none could be validated")
         rate_limiter.record_success()
         return sorted(offers, key=lambda offer: offer.price_twd)
