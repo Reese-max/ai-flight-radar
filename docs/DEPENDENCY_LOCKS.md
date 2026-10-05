@@ -29,16 +29,18 @@ npm --prefix cloudflare install --package-lock-only --ignore-scripts --no-audit 
 
 # Python (from the repository root; keep the cutoff date in sync with
 # .github/workflows/dependency-locks.yml)
-uv pip compile --python-version 3.12 --generate-hashes \
+uv pip compile --python-version 3.12 --generate-hashes --upgrade \
   --exclude-newer 2026-10-03T00:00:00Z \
   -o requirements.lock requirements.txt
-uv pip compile --python-version 3.12 --generate-hashes \
+uv pip compile --python-version 3.12 --generate-hashes --upgrade \
   --exclude-newer 2026-10-03T00:00:00Z \
   -o requirements-dev.lock requirements-dev.txt
 ```
 
-`--exclude-newer` freezes the resolver's view of the package indexes, so
-regeneration is byte-identical until someone deliberately moves the cutoff.
+`--exclude-newer` freezes the resolver's view of the package indexes.
+`--upgrade` ignores compatible pins in an existing output file, so advancing
+the cutoff actually resolves the newer eligible versions. With the cutoff
+unchanged, regeneration reproduces the reviewed resolution.
 After regenerating, `git diff --exit-code` must be clean unless the change
 is the intended update under review.
 
@@ -67,7 +69,8 @@ python -m pytest tests/test_reproducible_builds.py -q
 - The collector and seed workflows install from `requirements.lock` with
   `--require-hashes`; the Docker image builds from `requirements.lock`.
 - The `Dependency locks drift gate` workflow installs from all three
-  artifacts, regenerates them with the documented commands, and fails when
+  artifacts, runs an offline local-wheel check proving old output pins do not
+  influence resolution, regenerates them with the documented commands, and fails when
   `git diff --exit-code` reports any change. Changing a manifest without
   regenerating its lock fails this gate; regenerating through the documented
   commands returns it to green.

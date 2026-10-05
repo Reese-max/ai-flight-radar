@@ -42,14 +42,16 @@ jobs:
         run: |
           python -m pip install --require-hashes -r requirements.lock
           python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Prove fresh resolution ignores older compatible output pins
+        run: python tests/lock_resolution_smoke.py
       - name: Regenerate locks and fail on drift
         shell: bash
         run: |
           set -euo pipefail
-          uv pip compile --python-version 3.12 --generate-hashes \
+          uv pip compile --python-version 3.12 --generate-hashes --upgrade \
             --exclude-newer "$LOCK_EXCLUDE_NEWER" \
             -o requirements.lock requirements.txt
-          uv pip compile --python-version 3.12 --generate-hashes \
+          uv pip compile --python-version 3.12 --generate-hashes --upgrade \
             --exclude-newer "$LOCK_EXCLUDE_NEWER" \
             -o requirements-dev.lock requirements-dev.txt
           npm --prefix cloudflare install --package-lock-only --ignore-scripts --no-audit --no-fund
