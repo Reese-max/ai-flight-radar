@@ -236,17 +236,20 @@ def coverage_plan(root: Path = ROOT, active_routes: int | None = None, revisit_h
         'invariant':'active routes / revisit hours <= min(runs per hour * max tasks per run, hourly claim budget)'}
 
 def simulate_coverage(active_routes: int, revisit_hours: int, runs_per_hour: int, max_tasks_per_run: int,
+                      claim_budget: int,
                       error_backoff_hours: int = 1, windows: int = 2, error_runs: Sequence[int] = ()) -> dict:
     """Deterministic frozen-clock replay of the scheduled collector over the route matrix.
 
     Mirrors the real claim order (due routes first) and the real failure semantics:
     an ok/empty result reschedules a route one revisit interval later, an error
     stops the rest of that batch and retries the route after the error backoff.
+    Every hour shares the deployed claim budget across scheduled batches;
+    offered cron capacity cannot bypass the same counter used by the Worker.
     `error_runs` names absolute run numbers, counting every scheduled run of the
     horizon from zero.
     """
     if not all(isinstance(value,int) and value > 0 for value in
-               (active_routes,runs_per_hour,max_tasks_per_run,windows)) or revisit_hours < 1 or error_backoff_hours < 1:
+               (active_routes,runs_per_hour,max_tasks_per_run,claim_budget,windows)) or revisit_hours < 1 or error_backoff_hours < 1:
         raise SafeFailure('Coverage simulation needs positive integer arguments')
     errors = set(error_runs)
     horizon = revisit_hours * windows
@@ -255,30 +258,45 @@ def simulate_coverage(active_routes: int, revisit_hours: int, runs_per_hour: int
     last = dict.fromkeys(due)
     gaps = {route:[] for route in due}
     attempts = error_count = 0
+    claims_per_hour = []
     for hour in range(horizon + 1):
+        claimed = 0
         for index in range(runs_per_hour):
             now = hour + index / runs_per_hour
-            batch = sorted((at, route) for route, at in due.items() if at <= now)[:max_tasks_per_run]
+            available = min(max_tasks_per_run, claim_budget - claimed)
+            if not available:
+                continue
+            batch = sorted((at, route) for route, at in due.items() if at <= now)[:available]
             if not batch:
+                # Worker budget() runs before checking whether a task is due.
+                claimed += 1
                 continue
             batch = [route for _, route in batch]
             attempts += 1
             if hour * runs_per_hour + index in errors:
+                claimed += 1
                 error_count += 1
                 due[batch[0]] = now + error_backoff_hours
                 continue  # An upstream failure ends this batch, exactly like run_batch.
             for route in batch:
+                claimed += 1
                 if served[route]:
                     gaps[route].append(round(now - last[route], 6))
                 served[route] += 1
                 last[route] = now
                 due[route] = now + revisit_hours
+            if len(batch) < available:
+                # run_batch claims once more and stops on an empty queue.
+                claimed += 1
+        claims_per_hour.append(claimed)
     observed = [gap for values in gaps.values() for gap in values]
     delayed = sorted(route for route, values in gaps.items() if any(gap > revisit_hours for gap in values))
     unserved = sorted(route for route in due if not served[route])
     max_interval = max(observed) if observed else None
     return {'active_routes':active_routes,'revisit_hours':revisit_hours,'runs_per_hour':runs_per_hour,
-        'max_tasks_per_run':max_tasks_per_run,'windows':windows,'horizon_hours':horizon,'batches':attempts,
+        'max_tasks_per_run':max_tasks_per_run,'claim_budget':claim_budget,
+        'max_claims_per_hour':max(claims_per_hour),'claims_per_hour':claims_per_hour,
+        'windows':windows,'horizon_hours':horizon,'batches':attempts,
         'served':sum(served.values()),'errors':error_count,'unserved':unserved,
         'routes_delayed':delayed,'max_interval_hours':max_interval,'degraded':error_count > 0,
         'target_met':error_count == 0 and not unserved and not delayed and max_interval is not None

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {LocalD1} from '../scripts/sqlite-d1.mjs';
 import {createHandler} from '../src/worker.mjs';
 import {APP_ID} from '../src/catalog.mjs';
-import {DAY,taskSpec} from '../src/logic.mjs';
+import {DAY,HOUR,TTL,taskSpec} from '../src/logic.mjs';
 const ADMIN='a'.repeat(48),COLLECTOR='c'.repeat(48),UUID=()=>crypto.randomUUID();
 function rig(t){
   const db=new LocalD1();t.after(()=>db.close());
@@ -83,7 +83,7 @@ test('current batch is excluded from five-day price comparison',async t=>{const 
 test('different travel dates never share history',async t=>{const r=rig(t);const [dbTask]=await r.seed();const other={...dbTask,query_key:'f'.repeat(64),depart_date:'2026-11-13',return_date:'2026-11-17'};for(let d=1;d<=6;d++)r.snapshot(other,50000,r.clock.now-d*DAY);await r.complete(await r.claim());assert.equal((await r.request('/api/ui/quotes')).body.quotes[0].baseline_confident,false);});
 test('truncated history refuses a confident discount',async t=>{const r=rig(t);const [dbTask]=await r.seed();for(let i=0;i<721;i++)r.snapshot(dbTask,8000,r.clock.now-(i+1)*60000);await r.complete(await r.claim());assert.equal((await r.request('/api/ui/quotes')).body.quotes[0].history_truncated,true);});
 test('newer expensive quote hides older cheap quote for budget filter',async t=>{const r=rig(t);const [task]=await r.seed();r.snapshot(task,5000,r.clock.now-60000);r.snapshot(task,9000,r.clock.now);assert.equal((await r.request('/api/ui/quotes?max_price=6000')).body.quotes.length,0);});
-test('expired quote omitted in exploration but retained with stale flag in dates/detail',async t=>{const r=rig(t);const [task]=await r.seed();const id=r.snapshot(task,5000,r.clock.now-13*3600000);assert.equal((await r.request('/api/ui/quotes')).body.quotes.length,0);assert.equal((await r.request('/api/ui/dates/TPE/FUK')).body.quotes[0].expired,true);assert.equal((await r.request('/api/ui/quote/'+id)).body.expired,true);});
+test('expired quote omitted in exploration but retained with stale flag in dates/detail',async t=>{const r=rig(t);const [task]=await r.seed();const id=r.snapshot(task,5000,r.clock.now-TTL-HOUR);assert.equal((await r.request('/api/ui/quotes')).body.quotes.length,0);assert.equal((await r.request('/api/ui/dates/TPE/FUK')).body.quotes[0].expired,true);assert.equal((await r.request('/api/ui/quote/'+id)).body.expired,true);});
 test('invalid snapshot UUID yields 422',async t=>{const r=rig(t);assert.equal((await r.request('/api/ui/quote/invalid')).status,422);});
 test('unknown valid snapshot UUID yields 404',async t=>{const r=rig(t);assert.equal((await r.request('/api/ui/quote/'+UUID())).status,404);});
 for(const query of ['origin=XXX','origin=TPE%27%20OR%201%3D1','start_date=2026-02-30','start_date=2026-12-10&end_date=2026-10-10','min_days=7&max_days=3','limit=101','offset=-1','sort=sql','max_price=0']){

@@ -1,0 +1,58 @@
+name: Dependency locks drift gate
+# Proves a clean checkout reproduces the reviewed dependency graphs.
+# Fails when a manifest changes without its lock being regenerated through
+# the documented commands in docs/DEPENDENCY_LOCKS.md.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: dependency-locks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      WRANGLER_SEND_METRICS: 'false'
+      CI: 'true'
+      # Resolution cutoff baked into requirements.lock / requirements-dev.lock.
+      # Bumping it is a deliberate dependency update (see docs/DEPENDENCY_LOCKS.md).
+      LOCK_EXCLUDE_NEWER: '2026-10-03T00:00:00Z'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: '0.12.21'
+      - name: Install Node from the committed lock
+        working-directory: cloudflare
+        run: npm ci
+      - name: Install Python from the committed locks
+        run: |
+          python -m pip install --require-hashes -r requirements.lock
+          python -m pip install --require-hashes -r requirements-dev.lock
+      - name: Prove fresh resolution ignores older compatible output pins
+        run: python tests/lock_resolution_smoke.py
+      - name: Regenerate locks and fail on drift
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv pip compile --python-version 3.12 --generate-hashes --upgrade \
+            --exclude-newer "$LOCK_EXCLUDE_NEWER" \
+            -o requirements.lock requirements.txt
+          uv pip compile --python-version 3.12 --generate-hashes --upgrade \
+            --exclude-newer "$LOCK_EXCLUDE_NEWER" \
+            -o requirements-dev.lock requirements-dev.txt
+          npm --prefix cloudflare install --package-lock-only --ignore-scripts --no-audit --no-fund
+          git diff --exit-code -- requirements.lock requirements-dev.lock cloudflare/package-lock.json

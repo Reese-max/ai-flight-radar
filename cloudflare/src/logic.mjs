@@ -3,9 +3,9 @@ import {origins,destinations} from './catalog.mjs';
 export const DAY=86400000, HOUR=3600000, ERROR_BACKOFF_MS=HOUR;
 /** Revisit interval of a completed ok/empty task. Capacity contract:
  *  active routes / REVISIT_HOURS <= scheduled runs per hour * max tasks per run,
- *  and <= the deployed hourly claim budget. 48 routes at 12h = 4 claims/hour of
- *  the 6 claims/hour the bounded collector can serve. */
-export const REVISIT_HOURS=12, REVISIT_MS=REVISIT_HOURS*HOUR;
+ *  and <= the deployed hourly claim budget. 48 routes at 24h = 2 claims/hour of
+ *  the preserved 3 claims/hour budget the bounded collector can serve. */
+export const REVISIT_HOURS=24, REVISIT_MS=REVISIT_HOURS*HOUR;
 /** An observation stays listed as a valid quote until its refresh is due. */
 export const TTL=REVISIT_MS;
 export class HttpError extends Error {

@@ -12,7 +12,7 @@ const mime={'.html':'text/html; charset=utf-8','.css':'text/css','.js':'text/jav
 export async function startLocal({port=8788,filename=':memory:',admin='',collector='',enabled=false,assets}={}){
   if(!Number.isInteger(port)||port<0||port>65535)throw new Error('Invalid port');
   const db=new LocalD1(filename),env={DB:db,APP_ID,ADMIN_KEY:admin,COLLECTOR_KEY:collector,COLLECTOR_ENABLED:enabled?'true':'false',
-    MAX_SEARCHES_PER_HOUR:'6',ASSETS:{fetch:assets||(async(request)=>{
+    MAX_SEARCHES_PER_HOUR:'3',ASSETS:{fetch:assets||(async(request)=>{
       let name;try{name=decodeURIComponent(new URL(request.url).pathname);}catch{return new Response('Bad path',{status:400});}
       const file=path.resolve(publicDir,'.'+(name==='/'?'/index.html':name));
       if(!file.startsWith(publicDir+path.sep)||!mime[path.extname(file)])return new Response('Not found',{status:404});
