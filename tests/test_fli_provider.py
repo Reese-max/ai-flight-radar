@@ -119,3 +119,21 @@ def test_unknown_fields_stay_unknown(monkeypatch):
     offer = p.search("TPE", "NRT", "2027-01-01")[0]
     assert offer.legs[0].flight_no is None and offer.legs[0].plane_type == ""
     assert offer.primary_airline == "未知航空"
+
+
+@pytest.mark.parametrize('code', ['7C', ' 5j ', '9C'])
+def test_digit_leading_iata_airline_codes_use_real_vendored_enum(monkeypatch, code):
+    from fli.models import Airline
+    p = FliCustomProvider()
+    seen = []
+    monkeypatch.setattr(p, '_fetch', lambda filters: seen.append(filters.airlines) or [])
+    assert p.search('TPE', 'NRT', '2027-01-01', airlines=[code]) == []
+    assert seen == [[Airline['_' + code.strip().upper()]]]
+
+
+@pytest.mark.parametrize('code', ['ZZZZ', ''])
+def test_unknown_airline_still_fails_before_upstream_request(monkeypatch, code):
+    p = FliCustomProvider()
+    monkeypatch.setattr(p, '_fetch', lambda _filters: pytest.fail('invalid code reached upstream'))
+    with pytest.raises(FliProviderError):
+        p.search('TPE', 'NRT', '2027-01-01', airlines=[code])

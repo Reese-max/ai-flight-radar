@@ -79,7 +79,9 @@ class FliCustomProvider(BaseFlightProvider):
             mapped_airlines = None
             if airlines is not None:
                 try:
-                    mapped_airlines = [Airline[code.strip().upper()] for code in airlines]
+                    codes = [code.strip().upper() for code in airlines]
+                    mapped_airlines = [Airline["_" + code if code[:1].isdigit() else code]
+                                       for code in codes]
                 except KeyError:
                     raise ValueError("Unknown airline code")
             segments = [FlightSegment(departure_airport=[[Airport[origin], 0]],

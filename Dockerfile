@@ -4,8 +4,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 \
     DEPLOYMENT_MODE=public AUTOSCAN_ENABLED=false \
     NTFY_ENABLED=false TELEGRAM_ENABLED=false
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt \
+COPY requirements.txt requirements.lock ./
+RUN pip install --require-hashes --no-cache-dir -r requirements.lock \
     && useradd --create-home --uid 10001 radar
 COPY --chown=radar:radar . .
 RUN mkdir -p /app/data && chown radar:radar /app/data
