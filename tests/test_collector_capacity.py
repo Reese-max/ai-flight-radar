@@ -119,10 +119,10 @@ def test_the_plan_is_derived_from_the_checked_in_configuration_files(tmp_path):
     write_configuration(tmp_path)
     derived = collector().coverage_plan(root=tmp_path)
     assert derived['active_routes'] == 48
-    assert derived['revisit_hours'] == 24
+    assert derived['revisit_hours'] == 12
     assert derived['runs_per_hour'] == 2
     assert derived['max_tasks_per_run'] == 3
-    assert derived['claim_budget'] == 3
+    assert derived['claim_budget'] == 6
     assert derived['sustainable'] is True
 
 
@@ -143,10 +143,10 @@ def test_a_generated_deploy_config_is_the_budget_that_actually_ships(tmp_path):
     write_configuration(tmp_path)
     assert collector().coverage_plan(root=tmp_path)['budget_source'] == 'wrangler.json'
     (tmp_path / 'cloudflare/wrangler.deploy.json').write_text(
-        json.dumps({'vars': {'MAX_SEARCHES_PER_HOUR': '1'}}) + '\n', encoding='utf-8')
+        json.dumps({'vars': {'MAX_SEARCHES_PER_HOUR': '3'}}) + '\n', encoding='utf-8')
     deployed = collector().coverage_plan(root=tmp_path)
     assert deployed['budget_source'] == 'wrangler.deploy.json'
-    assert deployed['claim_budget'] == 1
+    assert deployed['claim_budget'] == 3
     assert deployed['sustainable'] is False
 
 
@@ -157,7 +157,7 @@ def test_the_local_development_server_uses_the_checked_in_claim_budget():
     assert int(budget.group(1)) == plan()['claim_budget'] == 3
 
 
-def write_configuration(root, logic='export const REVISIT_HOURS=24,REVISIT_MS=REVISIT_HOURS*HOUR;\n'
+def write_configuration(root, logic='export const REVISIT_HOURS=12,REVISIT_MS=REVISIT_HOURS*HOUR;\n'
         'export const ERROR_BACKOFF_MS=HOUR;export const TTL=REVISIT_MS;\n',
         store='REVISIT_MS,ERROR_BACKOFF_MS\n'):
     (root / 'cloudflare/src').mkdir(parents=True, exist_ok=True)
@@ -165,10 +165,67 @@ def write_configuration(root, logic='export const REVISIT_HOURS=24,REVISIT_MS=RE
     (root / 'cloudflare/src/logic.mjs').write_text(logic, encoding='utf-8')
     (root / 'cloudflare/src/store.mjs').write_text(store, encoding='utf-8')
     (root / 'cloudflare/wrangler.json').write_text(
-        json.dumps({'vars': {'MAX_SEARCHES_PER_HOUR': '3'}}) + '\n', encoding='utf-8')
+        json.dumps({'vars': {'MAX_SEARCHES_PER_HOUR': '6'}}) + '\n', encoding='utf-8')
     (root / '.github/workflows/collector.yml').write_text(
         "  schedule:\n    - cron: '17,47 * * * *'\n"
         '        run: python cloudflare/scripts/collector.py --execute --max-tasks 3\n', encoding='utf-8')
+
+
+def test_default_capacity_preserves_three_claims_per_hour_without_budget_increase():
+    checked_in = plan()
+    assert checked_in['claim_budget'] == 3
+    assert checked_in['revisit_hours'] == 24
+    assert checked_in['demand_per_hour'] == 2
+    assert checked_in['headroom_per_hour'] == 1
+
+
+def test_replay_enforces_the_actual_hourly_budget_even_across_two_scheduled_runs():
+    summary = collector().simulate_coverage(active_routes=48, revisit_hours=24,
+        runs_per_hour=2, max_tasks_per_run=3, claim_budget=3)
+    assert summary['target_met'] is True
+    assert max(summary['claims_per_hour']) <= 3
+    assert summary['budget_rejections'] > 0
+
+
+def test_twelve_hour_revisits_starve_at_the_preserved_hourly_budget():
+    summary = collector().simulate_coverage(active_routes=48, revisit_hours=12,
+        runs_per_hour=2, max_tasks_per_run=3, claim_budget=3)
+    assert summary['target_met'] is False
+    assert summary['routes_delayed']
+
+
+def test_empty_claims_consume_the_same_server_budget_as_claimed_tasks():
+    summary = collector().simulate_coverage(active_routes=1, revisit_hours=24,
+        runs_per_hour=2, max_tasks_per_run=3, claim_budget=3)
+    assert summary['claims_per_hour'][0] == 3
+    assert summary['served'] == 3
+    assert summary['target_met'] is True
+
+
+def test_original_six_hour_six_claim_arithmetic_defect_stays_rejected():
+    starved = plan(revisit_hours=6, claim_budget=6)
+    assert starved['demand_per_hour'] == 8
+    assert starved['capacity_per_hour'] == 6
+    assert starved['sustainable'] is False
+
+
+def test_sparse_hours_cannot_average_away_the_per_wall_hour_budget():
+    with pytest.raises(collector().SafeFailure):
+        collector().cron_runs_per_hour('*/10 */2 * * *')
+
+
+def test_cron_minute_union_counts_duplicate_or_overlapping_fields_once():
+    assert collector().cron_runs_per_hour('17,17 * * * *') == 1
+    assert collector().cron_runs_per_hour('0,*/30 * * * *') == 2
+
+
+@pytest.mark.parametrize('budget', ['3oops', 3.5, True, None])
+def test_deploy_budget_must_be_a_complete_integer_value(tmp_path, budget):
+    write_configuration(tmp_path)
+    (tmp_path / 'cloudflare/wrangler.deploy.json').write_text(
+        json.dumps({'vars': {'MAX_SEARCHES_PER_HOUR': budget}}), encoding='utf-8')
+    with pytest.raises(collector().SafeFailure):
+        collector().coverage_plan(root=tmp_path)
 
 
 def test_replay_enforces_the_hourly_claim_budget_even_when_cron_can_offer_more():

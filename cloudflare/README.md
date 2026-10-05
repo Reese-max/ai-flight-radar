@@ -19,7 +19,7 @@ python cloudflare/scripts/collector.py
 python cloudflare/scripts/collector.py --check-capacity
 ```
 
-最後一行只顯示 dry-run，不連 Cloudflare 或 Google Flights。
+收集器未加 `--execute` 時只顯示 dry-run，不連 Cloudflare 或 Google Flights。
 `--check-capacity` 只讀取已檢查的排程、重訪間隔與部署預算，印出覆蓋容量契約；不符合就以非零狀態結束。
 測試使用 SQLite 實作的 D1 介面替身，不代表 Cloudflare runtime 已驗收。
 

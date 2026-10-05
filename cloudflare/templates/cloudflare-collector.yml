@@ -11,7 +11,7 @@ on:
   # To enable scheduled runs AFTER validation, uncomment only a cadence that
   # `python cloudflare/scripts/collector.py --check-capacity` reports as
   # sustainable. The 48-route matrix needs 2 claims/hour at the 24h revisit
-  # interval; the shared hourly claim budget remains 3 across both runs:
+  # interval; the hourly server budget remains 3 across both scheduled runs:
   # schedule:
   #   - cron: '17,47 * * * *'
 permissions:
