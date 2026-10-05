@@ -3,6 +3,9 @@ from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
 
+class ProviderSearchError(RuntimeError):
+    """A provider failed; an empty result remains a successful no-results response."""
+
 class FlightLeg(BaseModel):
     origin: str
     destination: str

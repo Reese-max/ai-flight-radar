@@ -83,6 +83,22 @@ class CollectorTests(unittest.TestCase):
         with patch.dict('os.environ',{'RADAR_COLLECTOR_KEY':'secret','GITHUB_TOKEN':'secret','ADMIN_KEY':'secret'}),patch('subprocess.run',side_effect=fake):
             search_subprocess(task())
         self.assertNotIn('RADAR_COLLECTOR_KEY',captured['env']);self.assertNotIn('GITHUB_TOKEN',captured['env']);self.assertEqual(captured['timeout'],90)
+    def test_child_receives_only_explicit_allowlisted_provider_settings(self):
+        captured={}
+        def fake(*a,**k):captured.update(k);return SimpleNamespace(returncode=0,stdout='{"outcome":"empty"}')
+        settings={'RADAR_PRIMARY_PROVIDER':'fli','RADAR_FALLBACK_PROVIDER':'fast_flights',
+                  'RADAR_COLLECTOR_KEY':'mock-secret','GITHUB_TOKEN':'mock-secret','ADMIN_KEY':'mock-secret'}
+        with patch.dict('os.environ',settings),patch('subprocess.run',side_effect=fake):
+            self.assertEqual(search_subprocess(task()),{'outcome':'empty'})
+        env=captured['env']
+        self.assertEqual(env['RADAR_PRIMARY_PROVIDER'],'fli')
+        self.assertEqual(env['RADAR_FALLBACK_PROVIDER'],'fast_flights')
+        for secret_name in ('RADAR_COLLECTOR_KEY','GITHUB_TOKEN','ADMIN_KEY'):
+            self.assertNotIn(secret_name,env)
+    def test_invalid_provider_setting_is_rejected_before_subprocess(self):
+        with patch.dict('os.environ',{'RADAR_FALLBACK_PROVIDER':'fast_flights;bad'}),patch('subprocess.run') as run:
+            with self.assertRaises(SafeFailure):search_subprocess(task())
+            run.assert_not_called()
     def test_minimum_valid_offer_selected(self):
         result=normalize([offer(9000),offer(5000)],task())
         self.assertEqual(result['price_twd'],5000);self.assertEqual(result['offer_count'],2)

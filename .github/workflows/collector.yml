@@ -35,6 +35,8 @@ jobs:
           RADAR_URL: ${{ vars.CF_RADAR_URL }}
           RADAR_COLLECTOR_KEY: ${{ secrets.CF_RADAR_COLLECTOR_KEY }}
           RADAR_COLLECTOR_ENABLED: 'true'
+          RADAR_PRIMARY_PROVIDER: ${{ vars.RADAR_PRIMARY_PROVIDER || 'fast_flights' }}
+          RADAR_FALLBACK_PROVIDER: ${{ vars.RADAR_FALLBACK_PROVIDER }}
           NTFY_ENABLED: 'false'
           TELEGRAM_ENABLED: 'false'
         run: python cloudflare/scripts/collector.py --execute --max-tasks 3
