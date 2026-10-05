@@ -3,6 +3,9 @@ from datetime import datetime
 from typing import Optional
 from uuid import uuid4
 from sqlmodel import Field, SQLModel
+from sqlalchemy import DateTime
+
+# SQLite stores existing radar timestamps as timezone-free UTC.
 
 
 class SearchSnapshot(SQLModel, table=True):
@@ -21,17 +24,17 @@ class SearchSnapshot(SQLModel, table=True):
     direct_only: bool = True
     adults: int = 1
     cabin: str = "economy"
-    searched_at: datetime = Field(default_factory=datetime.utcnow, index=True)
+    searched_at: datetime = Field(default_factory=datetime.utcnow, index=True, sa_type=DateTime(timezone=False))
 
 
 class TaskLease(SQLModel, table=True):
     __tablename__ = "task_leases"
     task_id: int = Field(primary_key=True)
     owner: str
-    expires_at: datetime = Field(index=True)
+    expires_at: datetime = Field(index=True, sa_type=DateTime(timezone=False))
 
 
 class RadarMigration(SQLModel, table=True):
     __tablename__ = "radar_migrations"
     name: str = Field(primary_key=True)
-    applied_at: datetime = Field(default_factory=datetime.utcnow)
+    applied_at: datetime = Field(default_factory=datetime.utcnow, sa_type=DateTime(timezone=False))
