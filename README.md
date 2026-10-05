@@ -93,3 +93,5 @@ CI 包含原有測試、UI/API 測試、Node 顯示邏輯、瀏覽器模擬與 D
 - [後續路線圖](docs/ROADMAP.md)
 
 原儲存庫尚未提供專案 LICENSE；本次不代替作者決定授權。公開可讀不等於可忽略授權，引用相依專案仍需遵守各自條款。
+
+各類程式、文件、設計資產、報價觀察與貢獻權利的待決事項見 [權利決策備忘錄](docs/RIGHTS_DECISION.md)；準備修補前請讀 [CONTRIBUTING.md](CONTRIBUTING.md)。Owner／人工法律覆核尚未完成，此備忘錄不授予新權利。
