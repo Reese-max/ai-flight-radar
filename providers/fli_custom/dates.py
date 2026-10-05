@@ -54,8 +54,44 @@ def _load_dates_engine():
 def _fetch_dates(filters):
     """Isolated engine call — tests monkeypatch this, never the network."""
     *_models, SearchDates = _load_dates_engine()
-    return SearchDates().search(
+    engine = SearchDates()
+    engine.client = _CalendarResponseClient(engine.client)
+    return engine.search(
         filters, currency="TWD", language="zh-TW", country="TW")
+
+
+class _CalendarResponseClient:
+    """Validate the calendar frame before upstream can coerce malformed data to None.
+
+    The existing client retains its bounded retries and timeout. This wrapper
+    makes no additional request and leaves the vendored parser unchanged.
+    """
+
+    def __init__(self, client):
+        self.client = client
+
+    def post(self, *args, **kwargs):
+        from fli.search._wire import parse_first_wrb_payload
+
+        response = self.client.post(*args, **kwargs)
+        response.raise_for_status()
+        payload = parse_first_wrb_payload(response.text)
+        if (not isinstance(payload, list) or not payload
+                or not isinstance(payload[-1], list)
+                or any(not isinstance(row, list) or len(row) < 3 for row in payload[-1])):
+            raise FliSearchError("Unsupported calendar response frame")
+        for row in payload[-1]:
+            prices = row[2]
+            if (not isinstance(prices, list) or not prices
+                    or not isinstance(prices[0], list) or len(prices[0]) < 2):
+                raise FliSearchError("Unsupported calendar price structure")
+            try:
+                price = Decimal(str(prices[0][1]))
+            except InvalidOperation as exc:
+                raise FliSearchError("Unverifiable calendar price") from exc
+            if not price.is_finite() or price <= 0:
+                raise FliSearchError("Unverifiable calendar price")
+        return response
 
 
 def _normalize_row(row, origin: str, destination: str, start: Date, end: Date,
@@ -130,6 +166,13 @@ def search_flexible_dates(origin: str, destination: str, from_date: str,
         raise FliProviderError("max_stops must be between 0 and 2")
     if type(adults) is not int or adults < 1:
         raise FliProviderError("adults must be a positive integer")
+    if not isinstance(cabin, str):
+        raise FliProviderError("cabin must be a supported string")
+    if airlines is not None and (
+        not isinstance(airlines, list)
+        or any(not isinstance(code, str) for code in airlines)
+    ):
+        raise FliProviderError("airlines must be a list of IATA strings")
 
     try:
         (Airport, DateSearchFilters, _segment, MaxStops,
@@ -146,7 +189,9 @@ def search_flexible_dates(origin: str, destination: str, from_date: str,
         mapped_airlines = None
         if airlines is not None:
             try:
-                mapped_airlines = [Airline[code.strip().upper()] for code in airlines]
+                codes = [code.strip().upper() for code in airlines]
+                mapped_airlines = [Airline["_" + code if code[:1].isdigit() else code]
+                                   for code in codes]
             except (AttributeError, KeyError) as exc:
                 raise ValueError("Unknown airline code") from exc
         round_trip = trip_duration_days is not None

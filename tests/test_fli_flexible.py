@@ -1,5 +1,6 @@
 """Issue #8 phase 2: filter mapping, bounded flexible dates, route cap, fallback."""
 from datetime import datetime, timedelta
+import json
 from types import SimpleNamespace as NS
 import pytest
 
@@ -165,6 +166,129 @@ def test_flexible_date_search_maps_supported_airline_filter(monkeypatch):
     dates.search_flexible_dates("TPE", "KIX", "2027-02-01", "2027-02-20",
                                 trip_duration_days=4, airlines=["MM", "BR"])
     assert [airline.name for airline in seen["filters"].airlines] == ["MM", "BR"]
+
+
+@pytest.mark.parametrize("code", ["7C", " 5j ", "9C"])
+def test_flexible_dates_maps_digit_leading_airline_filters(monkeypatch, code):
+    from fli.models import Airline
+    from providers.fli_custom import dates
+
+    seen = []
+    monkeypatch.setattr(dates, "_fetch_dates", lambda filters: seen.append(filters.airlines) or [])
+    assert dates.search_flexible_dates(
+        "TPE", "KIX", "2027-02-01", "2027-02-20",
+        trip_duration_days=4, airlines=[code],
+    ) == []
+    assert seen == [[Airline["_" + code.strip().upper()]]]
+
+
+def test_boolean_adults_is_rejected_before_upstream_fetch(monkeypatch):
+    provider = FliCustomProvider()
+    called = []
+    monkeypatch.setattr(provider, "_fetch", lambda filters: called.append(filters) or [])
+    with pytest.raises(FliProviderError):
+        provider.search("TPE", "NRT", _dep(), adults=True)
+    assert not called
+
+
+@pytest.mark.parametrize("value", [-1, 9, True, False, "0", None])
+def test_direct_search_rejects_invalid_stop_filters_before_fetch(monkeypatch, value):
+    provider = FliCustomProvider()
+    called = []
+    monkeypatch.setattr(provider, "_fetch", lambda filters: called.append(filters) or [])
+    with pytest.raises(FliProviderError):
+        provider.search("TPE", "NRT", _dep(), max_stops=value)
+    assert not called
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"cabin": None}, {"cabin": 1}, {"cabin": []},
+    {"airlines": "MM"}, {"airlines": ("MM",)}, {"airlines": {"MM": True}},
+    {"airlines": 1}, {"airlines": [None]}, {"airlines": [1]},
+])
+@pytest.mark.parametrize("kind", ["direct", "flexible"])
+def test_search_rejects_malformed_optional_filters_before_fetch(monkeypatch, kwargs, kind):
+    from providers.fli_custom import dates
+
+    called = []
+    if kind == "direct":
+        provider = FliCustomProvider()
+        monkeypatch.setattr(provider, "_fetch", lambda filters: called.append(filters) or [])
+        search = lambda: provider.search("TPE", "NRT", _dep(), **kwargs)
+    else:
+        monkeypatch.setattr(dates, "_fetch_dates", lambda filters: called.append(filters) or [])
+        search = lambda: dates.search_flexible_dates(
+            "TPE", "KIX", "2027-02-01", "2027-02-20", **kwargs)
+    with pytest.raises(FliProviderError):
+        search()
+    assert not called
+
+
+def _wire_packet(payload):
+    return json.dumps([["wrb.fr", None, json.dumps(payload)]])
+
+
+def _real_calendar_engine_with_mock_transport(monkeypatch, body):
+    from providers.fli_custom import dates
+    from fli.models import (Airport, DateSearchFilters, FlightSegment,
+                            MaxStops, PassengerInfo, SeatType, TripType)
+    from fli.search.dates import SearchDates
+
+    monkeypatch.setattr(dates, "_load_dates_engine", lambda: (
+        Airport, DateSearchFilters, FlightSegment, MaxStops, PassengerInfo,
+        SeatType, TripType, SearchDates,
+    ))
+    calls = []
+    def post(**kwargs):
+        calls.append(kwargs)
+        return NS(text=body, raise_for_status=lambda: None)
+    monkeypatch.setattr("fli.search.dates.get_client", lambda: NS(post=post))
+    return calls
+
+
+@pytest.mark.parametrize("body", [
+    "<html>blocked</html>",
+    json.dumps([["changed", None, "[]"]]),
+    json.dumps([["wrb.fr", None, "not JSON"]]),
+    _wire_packet({"new_schema": True}),
+    _wire_packet([None, {"new_schema": True}]),
+    _wire_packet([None, [{}]]),
+    _wire_packet([None, [["2027-02-03"]]]),
+    _wire_packet([None, [["2027-02-03", None, {"new_price_schema": True}]]]),
+    _wire_packet([None, [["2027-02-03", None, [[None, "not a price"]]]]]),
+    _wire_packet([None, [["2027-02-03", None, [[None, None]]]]]),
+])
+def test_actual_calendar_wire_failures_are_typed_not_no_results(monkeypatch, body):
+    from providers.fli_custom import dates
+    from providers.fli_custom.errors import FliSearchError
+
+    calls = _real_calendar_engine_with_mock_transport(monkeypatch, body)
+    with pytest.raises(FliSearchError):
+        dates.search_flexible_dates("TPE", "KIX", "2027-02-01", "2027-02-20")
+    assert len(calls) == 1
+
+
+def test_actual_calendar_empty_frame_remains_successful_no_results(monkeypatch):
+    from providers.fli_custom import dates
+
+    calls = _real_calendar_engine_with_mock_transport(monkeypatch, _wire_packet([None, []]))
+    assert dates.search_flexible_dates("TPE", "KIX", "2027-02-01", "2027-02-20") == []
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("duration", [None, 4])
+def test_actual_calendar_supported_rows_pass_vendored_parser_and_normalization(monkeypatch, duration):
+    from providers.fli_custom import dates
+
+    row = ["2027-02-03", "2027-02-07" if duration else None, [[None, 6500]]]
+    calls = _real_calendar_engine_with_mock_transport(monkeypatch, _wire_packet([None, [row]]))
+    prices = dates.search_flexible_dates(
+        "TPE", "KIX", "2027-02-01", "2027-02-20", trip_duration_days=duration)
+    assert len(calls) == 1
+    assert len(prices) == 1 and prices[0].price_twd == 6500
+    assert prices[0].depart_date == "2027-02-03"
+    assert prices[0].return_date == ("2027-02-07" if duration else None)
+    assert prices[0].currency is None
 
 
 def test_flexible_dates_rejects_bad_duration():

@@ -40,12 +40,22 @@ installed.
 - `providers/fli_custom/provider.py`: `search(...)` now maps `cabin`
   (`ECONOMY|PREMIUM_ECONOMY|BUSINESS|FIRST`), `adults`, and IATA `airlines`
   into the vendored filter object; invalid values fail before any upstream call.
+  A local response wrapper refuses HTML or absent/invalid `wrb.fr` payloads
+  before the vendored search can return an ambiguous `None`. A supported empty
+  shopping frame remains `NO_RESULTS`; refused frames are typed failures that
+  may use the configured fallback. The existing client keeps its request budget.
 - `providers/fli_custom/dates.py`: bounded flexible-date search over
   `SearchDates`. The query range has a hard 61-day ceiling, one round-trip
   duration is limited to 1–30 days, and callers cannot raise the 50-result
   ceiling. Returned dates, duration, and TWD currency are validated before a
   result is exposed. Typed upstream failures remain distinct from an empty
   successful search.
+  Before the vendored calendar parser runs, the local adapter checks the
+  `wrb.fr` payload and terminal row array. HTML, missing/invalid wire frames,
+  unsupported terminal shapes, and malformed row structures are typed failures,
+  while a supported empty row array remains `NO_RESULTS`. The wrapper adds no
+  requests or retries and does not edit the upstream baseline. Offline transport
+  fixtures exercise the actual vendored parser; they are not live calibration.
 - `providers/fli_custom/plan.py`: `bound_route_matrix` enforces a hard 8-pair
   ceiling before building the Cartesian product.
 - `providers/selector.py`: `search_with_provider_chain()` uses the configured

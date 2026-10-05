@@ -44,6 +44,30 @@ def _load_engine():
             PassengerInfo, SeatType, TripType, SearchFlights)
 
 
+class _FlightResponseClient:
+    """Preserve the upstream request budget while refusing absent wire payloads."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def post(self, *args, **kwargs):
+        from fli.search._wire import parse_first_wrb_payload
+
+        response = self.client.post(*args, **kwargs)
+        response.raise_for_status()
+        payload = parse_first_wrb_payload(response.text)
+        if not isinstance(payload, list) or len(payload) < 4:
+            raise FliSearchError("Unsupported flight response frame")
+        buckets = payload[2:4]
+        if (all(bucket is None for bucket in buckets)
+                or any(bucket is not None and (
+                    not isinstance(bucket, list) or not bucket
+                    or not isinstance(bucket[0], list)
+                ) for bucket in buckets)):
+            raise FliSearchError("Unsupported flight response buckets")
+        return response
+
+
 class FliCustomProvider(BaseFlightProvider):
     name = "fli_custom"
 
@@ -55,7 +79,9 @@ class FliCustomProvider(BaseFlightProvider):
     def _fetch(self, filters):
         """Isolated engine call — tests monkeypatch this, never the network."""
         *_models, SearchFlights = _load_engine()
-        return SearchFlights().search(
+        engine = SearchFlights()
+        engine.client = _FlightResponseClient(engine.client)
+        return engine.search(
             filters, top_n=TOP_N,
             currency=self.currency, language=self.language, country=self.country)
 
@@ -65,13 +91,22 @@ class FliCustomProvider(BaseFlightProvider):
                airlines: Optional[List[str]] = None
                ) -> List[StandardFlightOffer]:
         try:
+            if type(max_stops) is not int or max_stops not in (0, 1, 2):
+                raise ValueError("max_stops must be between 0 and 2")
+            if type(adults) is not int or adults < 1:
+                raise ValueError("adults must be a positive integer")
+            if not isinstance(cabin, str):
+                raise ValueError("cabin must be a supported string")
+            if airlines is not None and (
+                not isinstance(airlines, list)
+                or any(not isinstance(code, str) for code in airlines)
+            ):
+                raise ValueError("airlines must be a list of IATA strings")
             (Airport, FlightSearchFilters, FlightSegment, MaxStops,
              PassengerInfo, SeatType, TripType, _search) = _load_engine()
             from fli.models import Airline
-            stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER}.get(
-                max_stops, MaxStops.TWO_OR_FEWER_STOPS)
-            if not isinstance(adults, int) or adults < 1:
-                raise ValueError("adults must be a positive integer")
+            stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER,
+                     2: MaxStops.TWO_OR_FEWER_STOPS}[max_stops]
             try:
                 seat = SeatType[cabin.strip().upper()]
             except KeyError:

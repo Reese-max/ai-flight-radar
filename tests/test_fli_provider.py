@@ -4,6 +4,7 @@ Fixtures are SimpleNamespace stand-ins for Fli ``FlightResult``/``FlightLeg`` â€
 no vendored import, no network. The provider's ``_fetch`` seam is monkeypatched.
 """
 from datetime import datetime, timedelta
+import json
 from types import SimpleNamespace as NS
 import pytest
 
@@ -137,3 +138,51 @@ def test_unknown_airline_still_fails_before_upstream_request(monkeypatch, code):
     monkeypatch.setattr(p, '_fetch', lambda _filters: pytest.fail('invalid code reached upstream'))
     with pytest.raises(FliProviderError):
         p.search('TPE', 'NRT', '2027-01-01', airlines=[code])
+
+
+def _real_flight_engine_with_mock_transport(monkeypatch, body):
+    from providers.fli_custom import provider
+    from fli.models import (Airport, FlightSearchFilters, FlightSegment,
+                            MaxStops, PassengerInfo, SeatType, TripType)
+    from fli.search.flights import SearchFlights
+
+    monkeypatch.setattr(provider, "_load_engine", lambda: (
+        Airport, FlightSearchFilters, FlightSegment, MaxStops, PassengerInfo,
+        SeatType, TripType, SearchFlights,
+    ))
+    calls = []
+    def post(**kwargs):
+        calls.append(kwargs)
+        return NS(text=body, raise_for_status=lambda: None)
+    monkeypatch.setattr("fli.search.flights.get_client", lambda: NS(post=post))
+    return calls
+
+
+@pytest.mark.parametrize("body", [
+    "<html>blocked</html>",
+    json.dumps([["changed", None, "[]"]]),
+    json.dumps([["wrb.fr", None, "not JSON"]]),
+    json.dumps([["wrb.fr", None, "null"]]),
+    json.dumps([["wrb.fr", None, json.dumps({"new_schema": True})]]),
+    json.dumps([["wrb.fr", None, json.dumps([None, None, {}, {}])]]),
+    json.dumps([["wrb.fr", None, json.dumps([None, None, None, None])]]),
+    json.dumps([["wrb.fr", None, json.dumps([None, None, [{}], None])]]),
+    json.dumps([["wrb.fr", None, json.dumps([None, None, [""], None])]]),
+    json.dumps([["wrb.fr", None, json.dumps([None, None, 7, [[]]])]]),
+])
+def test_actual_flight_wire_failures_are_typed_for_provider_fallback(monkeypatch, body):
+    from providers.fli_custom.errors import FliSearchError
+
+    calls = _real_flight_engine_with_mock_transport(monkeypatch, body)
+    with pytest.raises(FliSearchError):
+        FliCustomProvider().search("TPE", "NRT", "2027-01-01")
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("return_date", [None, "2027-01-05"])
+@pytest.mark.parametrize("buckets", [[[[]], [[]]], [[[]], None], [None, [[]]]])
+def test_actual_flight_empty_frame_remains_successful_no_results(monkeypatch, return_date, buckets):
+    frame = json.dumps([["wrb.fr", None, json.dumps([None, None, *buckets])]])
+    calls = _real_flight_engine_with_mock_transport(monkeypatch, frame)
+    assert FliCustomProvider().search("TPE", "NRT", "2027-01-01", return_date) == []
+    assert len(calls) == 1
