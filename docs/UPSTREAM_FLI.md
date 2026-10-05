@@ -17,7 +17,7 @@ mechanical.
 | vendored_at | 2026-09-15 |
 | last_upstream_reviewed_at | 2026-09-15 |
 | local_patch_series | none — `third_party/fli/fli/` is byte-identical to upstream at `upstream_commit` |
-| customization_notes | Adapter only: `providers/fli_custom/` + `providers/selector.py`. Engine timeout bounded via `FLI_TIMEOUT=20`; round-trip expansion bounded via `top_n=3`. |
+| customization_notes | Adapter only: `providers/fli_custom/` + `providers/selector.py`. Engine timeout bounded via `FLI_TIMEOUT=20`; round-trip expansion bounded via `top_n=3`. Adapter surface: `search()` maps `cabin`→`SeatType`, `adults`→`PassengerInfo`, `airlines`→`Airline` include filter, and `origins`/`destinations` multi-airport lists (≤3 per side, one upstream request); `search_dates()`/`flexible_plan()` bound flexible-date calendar queries to ≤61-day windows and ≤4 requests per plan; `cloudflare/scripts/calibrate_fli.py` produces the bounded live calibration receipt (`docs/calibration/`). |
 
 ## Runtime dependencies
 
