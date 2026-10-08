@@ -4,13 +4,13 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import List, Optional
 from config.settings import settings
-from providers.base import BaseFlightProvider, StandardFlightOffer, FlightLeg
+from providers.base import BaseFlightProvider, StandardFlightOffer, FlightLeg, ProviderSearchError
 from providers.rate_limiter import rate_limiter
 
 logger = logging.getLogger(__name__)
 
 
-class ProviderError(RuntimeError):
+class ProviderError(ProviderSearchError):
     pass
 
 
@@ -22,7 +22,12 @@ class FastFlightsProvider(BaseFlightProvider):
     def search(self, origin: str, destination: str, depart_date: str,
                return_date: Optional[str] = None, max_stops: int = 0) -> List[StandardFlightOffer]:
         # Import lazily so --help, status and offline tests need not load a scraper.
-        import fast_flights
+        try:
+            import fast_flights
+        except (ImportError, OSError) as exc:
+            raise ProviderError(
+                "Provider engine unavailable; no price observation recorded"
+            ) from exc
         rate_limiter.wait()
         queries = [fast_flights.FlightQuery(date=depart_date, from_airport=origin,
                                            to_airport=destination, max_stops=max_stops)]

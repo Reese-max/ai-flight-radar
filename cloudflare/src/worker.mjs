@@ -20,7 +20,8 @@ export function createHandler(clock=Date.now){
       if(p==='/api/ui/access'&&method==='GET')await authorize(request,env,'admin');
       await store.ready(env);
       if(method==='GET'){
-        if(p==='/api/health')return json({status:'ok',app_id:APP_ID,schema_version:1,ui_version:'2.0-cf',demo:false});
+        if(p==='/api/health')return json({status:'ok',app_id:APP_ID,schema_version:1,ui_version:'2.0-cf',demo:false,
+          capabilities:{collector_error_types:1}});
         if(p==='/api/ui/config')return json(await store.config(env,now));
         if(p==='/api/ui/access')return json({authorized:true});
         if(p==='/api/ui/quotes')return json(await store.quotes(env.DB,url.searchParams,now));

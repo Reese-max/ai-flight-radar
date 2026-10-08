@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {LocalD1} from '../scripts/sqlite-d1.mjs';
 import {createHandler} from '../src/worker.mjs';
-import {APP_ID} from '../src/catalog.mjs';
+import {APP_ID,origins,destinations} from '../src/catalog.mjs';
 import {ROUTE_KEYS} from '../src/calibration.mjs';
-import {DAY,taskSpec} from '../src/logic.mjs';
+import {DAY,HOUR,REVISIT_HOURS,taskSpec} from '../src/logic.mjs';
 const ADMIN='a'.repeat(48),COLLECTOR='c'.repeat(48),UUID=()=>crypto.randomUUID();
 function admission(decision='BUILD',allowed=ROUTE_KEYS){
   const metric={attempted:3,successful:3,parse_complete:3,parse_sample_count:3,date_windows:[30,90,180],quote_age_sample_count:3,
@@ -50,7 +50,7 @@ function rig(t){
   return {db,clock,env,request,seed,claim,complete,snapshot};
 }
 
-test('health verifies database identity and contains no credentials',async t=>{const r=rig(t);const v=await r.request('/api/health');assert.equal(v.status,200);assert.equal(v.body.app_id,APP_ID);assert(!JSON.stringify(v).includes(ADMIN));});
+test('health verifies database identity, diagnostic capability, and contains no credentials',async t=>{const r=rig(t);const v=await r.request('/api/health');assert.equal(v.status,200);assert.equal(v.body.app_id,APP_ID);assert.deepEqual(v.body.capabilities,{collector_error_types:1});assert(!JSON.stringify(v).includes(ADMIN));});
 test('wrong database identity is rejected',async t=>{const r=rig(t);r.db.sqlite.exec("UPDATE cf_radar_meta SET value='other-app' WHERE key='app_id'");assert.equal((await r.request('/api/health')).status,503);});
 test('missing binding is a clear unavailable state not empty results',async t=>{const r=rig(t);delete r.env.DB;const v=await r.request('/api/ui/quotes');assert.equal(v.status,503);assert(!('quotes'in v.body));});
 test('static assets bypass API database checks',async t=>{const r=rig(t);delete r.env.DB;assert.equal((await r.request('/')).body,'static asset fixture');});
@@ -103,10 +103,11 @@ test('NARROW calibration leases only an approved route',async t=>{
   const task=await r.claim();assert.equal(task.origin,'TPE');assert.equal(task.destination,'FUK');
   assert.equal(r.db.sqlite.prepare("SELECT lease_owner FROM cf_radar_tasks WHERE destination='KIX'").get().lease_owner,null);
 });
+test('a deployment without an hourly claim budget fails closed instead of inventing one',async t=>{const r=rig(t);await r.seed();delete r.env.MAX_SEARCHES_PER_HOUR;const v=await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}});assert.equal(v.status,422);});
 test('two claim requests cannot own the same unexpired task',async t=>{const r=rig(t);await r.seed();const first=await r.claim(),second=await r.claim();assert(first);assert.equal(second,null);});
 test('expired lease may be reclaimed with a new token',async t=>{const r=rig(t);await r.seed();const a=await r.claim();r.clock.now+=901000;const b=await r.claim();assert.equal(a.id,b.id);assert.notEqual(a.lease_token,b.lease_token);});
-test('hourly claim budget cannot be bypassed by another run ID',async t=>{const r=rig(t);await r.seed();await r.claim();await r.claim();await r.claim();const v=await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}});assert.equal(v.status,429);assert(Number(v.headers.get('Retry-After'))>0);});
-test('the next hour resets the claim budget',async t=>{const r=rig(t);await r.seed();await r.claim();await r.claim();await r.claim();r.clock.now+=3600000;assert((await r.claim()).id);});
+test('hourly claim budget cannot be bypassed by another run ID',async t=>{const r=rig(t);await r.seed();for(let i=0;i<3;i++)await r.claim();const v=await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}});assert.equal(v.status,429);assert(Number(v.headers.get('Retry-After'))>0);});
+test('the next hour resets the claim budget',async t=>{const r=rig(t);await r.seed();for(let i=0;i<3;i++)await r.claim();r.clock.now+=3600000;assert((await r.claim()).id);});
 test('success stores one minimum-price observation and matching airline',async t=>{const r=rig(t);await r.seed();const task=await r.claim();const v=await r.complete(task);assert.equal(v.status,200,JSON.stringify(v.body));const q=(await r.request('/api/ui/quotes')).body.quotes;assert.equal(q.length,1);assert.equal(q[0].price_twd,5980);assert.equal(q[0].airline,'Synthetic test airline');assert.equal(q[0].baseline_twd,null);});
 test('identical result replay does not duplicate a snapshot or count',async t=>{const r=rig(t);await r.seed();const task=await r.claim();await r.complete(task);const v=await r.complete(task);assert.equal(v.body.replayed,true);assert.equal((await r.request('/api/ui/config')).body.search_snapshots,1);});
 test('different result with the same lease is rejected',async t=>{const r=rig(t);await r.seed();const task=await r.claim();await r.complete(task);assert.equal((await r.complete(task,{price_twd:1})).status,409);});
@@ -125,6 +126,32 @@ for(const bad of [0,-1,NaN,Infinity,true,12.5,'6000',1000001]){
 for(const outcome of ['empty','error']){
   test(`${outcome} creates no snapshot, retains last known fare`,async t=>{const r=rig(t);const [dbTask]=await r.seed();r.snapshot(dbTask,8000,r.clock.now-3600000);const task=await r.claim();const v=await r.request('/api/collector/result',{role:'collector',data:{task_id:task.id,lease_token:task.lease_token,outcome}});assert.equal(v.status,200);const q=(await r.request('/api/ui/quotes')).body.quotes;assert.equal(q[0].price_twd,8000);assert.equal((await r.request('/api/ui/config')).body.search_snapshots,1);assert(r.db.sqlite.prepare('SELECT next_run FROM cf_radar_tasks').get().next_run>r.clock.now);});
 }
+test('typed collector error is persisted without provider details',async t=>{
+  const r=rig(t);await r.seed();const task=await r.claim();
+  const v=await r.request('/api/collector/result',{role:'collector',data:{
+    task_id:task.id,lease_token:task.lease_token,outcome:'error',error_type:'TIMEOUT'}});
+  assert.equal(v.status,200,JSON.stringify(v.body));
+  assert.equal(r.db.sqlite.prepare('SELECT outcome FROM cf_radar_receipts').get().outcome,'error');
+  assert.equal(r.db.sqlite.prepare('SELECT last_outcome FROM cf_radar_tasks').get().last_outcome,'error:TIMEOUT');
+});
+test('legacy untyped error receipt can be replayed with its original hash',async t=>{
+  const r=rig(t);await r.seed();const task=await r.claim();const data={
+    task_id:task.id,lease_token:task.lease_token,outcome:'error'};
+  let v=await r.request('/api/collector/result',{role:'collector',data});
+  assert.equal(v.status,200,JSON.stringify(v.body));
+  v=await r.request('/api/collector/result',{role:'collector',data});
+  assert.equal(v.status,200,JSON.stringify(v.body));assert.equal(v.body.replayed,true);
+  assert.equal(r.db.sqlite.prepare('SELECT last_outcome FROM cf_radar_tasks').get().last_outcome,'error:UNKNOWN');
+});
+test('collector error types are closed and outcome-specific',async t=>{
+  const r=rig(t);await r.seed();let task=await r.claim();
+  let v=await r.request('/api/collector/result',{role:'collector',data:{
+    task_id:task.id,lease_token:task.lease_token,outcome:'error',error_type:'PRIVATE_PROVIDER_FAILURE'}});
+  assert.equal(v.status,422);
+  v=await r.request('/api/collector/result',{role:'collector',data:{
+    task_id:task.id,lease_token:task.lease_token,outcome:'empty',error_type:'TIMEOUT'}});
+  assert.equal(v.status,422);
+});
 test('non-success cannot smuggle a price',async t=>{const r=rig(t);await r.seed();const task=await r.claim();assert.equal((await r.complete(task,{outcome:'error'})).status,422);});
 test('typed failures are restricted, idempotent, and retained per task',async t=>{
   const r=rig(t);await r.seed();const task=await r.claim();
@@ -158,7 +185,7 @@ test('current batch is excluded from five-day price comparison',async t=>{const 
 test('different travel dates never share history',async t=>{const r=rig(t);const [dbTask]=await r.seed();const other={...dbTask,query_key:'f'.repeat(64),depart_date:'2026-11-13',return_date:'2026-11-17'};for(let d=1;d<=6;d++)r.snapshot(other,50000,r.clock.now-d*DAY);await r.complete(await r.claim());assert.equal((await r.request('/api/ui/quotes')).body.quotes[0].baseline_confident,false);});
 test('truncated history refuses a confident discount',async t=>{const r=rig(t);const [dbTask]=await r.seed();for(let i=0;i<721;i++)r.snapshot(dbTask,8000,r.clock.now-(i+1)*60000);await r.complete(await r.claim());assert.equal((await r.request('/api/ui/quotes')).body.quotes[0].history_truncated,true);});
 test('newer expensive quote hides older cheap quote for budget filter',async t=>{const r=rig(t);const [task]=await r.seed();r.snapshot(task,5000,r.clock.now-60000);r.snapshot(task,9000,r.clock.now);assert.equal((await r.request('/api/ui/quotes?max_price=6000')).body.quotes.length,0);});
-test('expired quote omitted in exploration but retained with stale flag in dates/detail',async t=>{const r=rig(t);const [task]=await r.seed();const id=r.snapshot(task,5000,r.clock.now-7*3600000);assert.equal((await r.request('/api/ui/quotes')).body.quotes.length,0);assert.equal((await r.request('/api/ui/dates/TPE/FUK')).body.quotes[0].expired,true);assert.equal((await r.request('/api/ui/quote/'+id)).body.expired,true);});
+test('expired quote omitted in exploration but retained with stale flag in dates/detail',async t=>{const r=rig(t);const [task]=await r.seed();const id=r.snapshot(task,5000,r.clock.now-25*3600000);assert.equal((await r.request('/api/ui/quotes')).body.quotes.length,0);assert.equal((await r.request('/api/ui/dates/TPE/FUK')).body.quotes[0].expired,true);assert.equal((await r.request('/api/ui/quote/'+id)).body.expired,true);});
 test('invalid snapshot UUID yields 422',async t=>{const r=rig(t);assert.equal((await r.request('/api/ui/quote/invalid')).status,422);});
 test('unknown valid snapshot UUID yields 404',async t=>{const r=rig(t);assert.equal((await r.request('/api/ui/quote/'+UUID())).status,404);});
 for(const query of ['origin=XXX','origin=TPE%27%20OR%201%3D1','start_date=2026-02-30','start_date=2026-12-10&end_date=2026-10-10','min_days=7&max_days=3','limit=101','offset=-1','sort=sql','max_price=0']){
@@ -176,9 +203,52 @@ test('source health distinguishes available from partial batches',async t=>{
   assert.equal((await r.request('/api/ui/config')).body.worker.source_health.state,'partial');
 });
 test('batch status expires without pretending to be a continuous process',async t=>{const r=rig(t);await r.request('/api/collector/report',{role:'collector',data:{run_id:UUID(),attempted:1,observed:1,errors:0}});r.clock.now+=4*3600000;const c=(await r.request('/api/ui/config')).body.worker;assert.equal(c.status,'stale');assert.equal(c.source_health.state,'stale');});
+test('typed batch counts are bounded and exposed without raw failures',async t=>{
+  const r=rig(t);const run_id=UUID();
+  let v=await r.request('/api/collector/report',{role:'collector',data:{
+    run_id,attempted:1,observed:0,errors:1,error_types:{TIMEOUT:1}}});
+  assert.equal(v.status,200,JSON.stringify(v.body));
+  const worker=(await r.request('/api/ui/config')).body.worker;
+  assert.equal(worker.status,'batch_error');assert.deepEqual(worker.error_types,{TIMEOUT:1});
+  const stored=JSON.parse(r.db.sqlite.prepare("SELECT value FROM cf_radar_meta WHERE key='last_batch'").get().value);
+  assert.deepEqual(stored.error_types,{TIMEOUT:1});assert.deepEqual(Object.keys(stored).sort(),
+    ['at','attempted','error_types','errors','observed','run_id']);
+  v=await r.request('/api/collector/report',{role:'collector',data:{
+    run_id:UUID(),attempted:1,observed:0,errors:1,error_types:{TIMEOUT:2}}});
+  assert.equal(v.status,422);
+});
+test('legacy untyped batch errors are retained as UNKNOWN',async t=>{
+  const r=rig(t);const v=await r.request('/api/collector/report',{role:'collector',data:{
+    run_id:UUID(),attempted:1,observed:0,errors:1}});
+  assert.equal(v.status,200);assert.deepEqual((await r.request('/api/ui/config')).body.worker.error_types,{UNKNOWN:1});
+});
 test('public quote list uses two bounded queries, no history N+1',async t=>{const r=rig(t);const [task]=await r.seed();r.snapshot(task,8000,r.clock.now);r.db.queries=0;await r.request('/api/ui/quotes');assert.equal(r.db.queries,2);});
 
 test('schema version mismatch is not advertised as a healthy version one database',async t=>{
   const r=rig(t);r.db.sqlite.exec("UPDATE cf_radar_meta SET value='2' WHERE key='schema_version'");
   assert.equal((await r.request('/api/health')).status,503);
+});
+
+
+test('actual D1 claims cover every admitted route within24h without exceeding original3/hour',async t=>{
+  const r=rig(t);
+  const tasks=ROUTE_KEYS.map(route=>{const [origin,destination]=route.split('/');return {origin,destination,depart_date:'2026-11-12',return_date:'2026-11-16'};});
+  const seeded=await r.seed(tasks),start=r.clock.now;
+  assert.equal(seeded.length,ROUTE_KEYS.length);assert.equal(REVISIT_HOURS,24);assert.equal(r.env.MAX_SEARCHES_PER_HOUR,'3');
+  const first=new Map(),last=new Map();let rejected=0;
+  for(let hour=0;hour<=48;hour++){
+    for(const minute of [17,47]){
+      r.clock.now=start+hour*HOUR+minute*60000;
+      for(let slot=0;slot<3;slot++){
+        const response=await r.request('/api/collector/claim',{role:'collector',data:{run_id:UUID()}});
+        if(response.status===429){rejected++;break;}
+        assert.equal(response.status,200);const task=response.body.task;if(!task)break;
+        if(!first.has(task.id))first.set(task.id,r.clock.now);
+        if(last.has(task.id))assert(r.clock.now-last.get(task.id)<=REVISIT_HOURS*HOUR);
+        last.set(task.id,r.clock.now);assert.equal((await r.complete(task)).status,200);
+      }
+    }
+    assert(r.db.sqlite.prepare("SELECT used FROM cf_radar_budgets WHERE name='collector_claim'").get().used<=3);
+  }
+  assert.equal(first.size,ROUTE_KEYS.length);assert(Math.max(...first.values())-start<24*HOUR);assert(rejected>0);
 });

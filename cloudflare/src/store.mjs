@@ -1,6 +1,6 @@
 import {APP_ID,origins,destinations,routes} from './catalog.mjs';
 import {collectorAdmission,inspectAdmission,ERROR_TYPES} from './calibration.mjs';
-import {DAY,TTL,HttpError,requireThat,record,integer,text,timestamp,dateOnly,taipeiToday,addDays,codes,taskSpec,digest,summarize,quoteView} from './logic.mjs';
+import {DAY,REVISIT_MS,ERROR_BACKOFF_MS,TTL,HttpError,requireThat,record,integer,text,timestamp,dateOnly,taipeiToday,addDays,codes,taskSpec,digest,summarize,quoteView} from './logic.mjs';
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const keyPattern=/^[0-9a-f]{64}$/;
 export async function ready(env){
@@ -70,7 +70,7 @@ export async function config(env,now){
   const errorTypes={};
   if(run?.error_types&&typeof run.error_types==='object'&&!Array.isArray(run.error_types))
     for(const [type,count] of Object.entries(run.error_types))
-      if(ERROR_TYPES.includes(type)&&Number.isSafeInteger(count)&&count>=0)errorTypes[type]=count;
+      if(ERROR_TYPES.includes(type)&&Number.isSafeInteger(count)&&count>=0&&count<=10)errorTypes[type]=count;
   const batchAt=run?Date.parse(run.at):NaN;
   const age=run?now-batchAt:Infinity;
   const status=!run?'not_started':!Number.isFinite(batchAt)||age>3*3600000||age<0?'stale':
@@ -134,7 +134,7 @@ export async function claim(env,body,now){
   record(body,['run_id']);requireThat(uuid.test(body.run_id),'Invalid run ID');
   const admission=collectorAdmission(env,now);
   requireThat(admission.admitted,'Collector is not admitted by current calibration',503);
-  const limit=Number(env.MAX_SEARCHES_PER_HOUR||'3');integer(limit,1,10,'server claim budget');
+  const limit=Number(env.MAX_SEARCHES_PER_HOUR??'');integer(limit,1,10,'server claim budget');
   await budget(env.DB,'collector_claim',limit,3600000,now);
   const token=crypto.randomUUID();
   const routeFilter=' AND ('+admission.allowed_routes.map(()=>'(origin=? AND destination=?)').join(' OR ')+')';
@@ -155,8 +155,10 @@ function normalizeResult(body){
     clean.offer_count=integer(body.offer_count,1,1000,'offer count');
   }else requireThat(['price_twd','searched_at','airline','offer_count'].every(k=>!(k in body)),'Non-success must not include a fare');
   if(body.outcome==='error'){
-    clean.error_type=body.error_type??'UNKNOWN';
-    requireThat(ERROR_TYPES.includes(clean.error_type),'Invalid error type');
+    if('error_type' in body){
+      clean.error_type=body.error_type;
+      requireThat(ERROR_TYPES.includes(clean.error_type),'Invalid error type');
+    }
   }else requireThat(!('error_type' in body),'Only errors may include an error type');
   return clean;
 }
@@ -188,6 +190,7 @@ export async function complete(env,body,now){
         Math.round((stats.baseline_twd-clean.price_twd)/stats.baseline_twd*1000)/10:null,
       source:'Google Flights',baggage_verified:false,source_url:source.href,offer_count:clean.offer_count};
   }
+  const taskOutcome=clean.outcome==='error'?'error:'+(clean.error_type??'UNKNOWN'):clean.outcome;
   const statements=[env.DB.prepare(`INSERT INTO cf_radar_receipts(token,payload_hash,task_id,outcome,completed_at)
     SELECT ?,?,?,?,? WHERE EXISTS(SELECT 1 FROM cf_radar_tasks WHERE id=? AND lease_owner=? AND lease_until>?)
     ON CONFLICT(token) DO NOTHING`).bind(clean.lease_token,hash,task.id,clean.outcome,new Date(now).toISOString(),task.id,clean.lease_token,now)];
@@ -198,8 +201,7 @@ export async function complete(env,body,now){
       payload.return_date,payload.trip_days,payload.price_twd,payload.searched_at,JSON.stringify(payload),clean.lease_token,hash));
   statements.push(env.DB.prepare(`UPDATE cf_radar_tasks SET lease_owner=NULL,lease_until=0,next_run=?,last_outcome=?
     WHERE id=? AND lease_owner=? AND EXISTS(SELECT 1 FROM cf_radar_receipts WHERE token=? AND payload_hash=?)`)
-    .bind(now+(clean.outcome==='error'?3600000:6*3600000),clean.outcome==='error'?'error:'+clean.error_type:clean.outcome,
-      task.id,clean.lease_token,clean.lease_token,hash));
+    .bind(now+(clean.outcome==='error'?ERROR_BACKOFF_MS:REVISIT_MS),taskOutcome,task.id,clean.lease_token,clean.lease_token,hash));
   const result=await env.DB.batch(statements);
   const receipt=await env.DB.prepare('SELECT payload_hash FROM cf_radar_receipts WHERE token=?').bind(clean.lease_token).first();
   requireThat(receipt?.payload_hash===hash,'Lease was reassigned or payload conflicted',409);

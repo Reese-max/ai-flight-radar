@@ -1,0 +1,40 @@
+{
+  "generated_at": "2026-10-03T05:37:57.007277+00:00",
+  "provider": "fli_custom",
+  "upstream": "punitarani/fli@121d34fea056dc513258958c4262cb5a4cc033c1",
+  "cases": [
+    {
+      "origin": "TPE",
+      "destination": "NRT",
+      "return": true,
+      "note": "round-trip direct",
+      "outcome": "success",
+      "offer_count": 66,
+      "lowest_price_twd": 8770,
+      "primary_airline": "樂桃航空",
+      "currency": "TWD"
+    },
+    {
+      "origin": "TPE",
+      "destination": "KIX",
+      "return": false,
+      "note": "one-way direct",
+      "outcome": "success",
+      "offer_count": 18,
+      "lowest_price_twd": 3513,
+      "primary_airline": "捷星日本航空",
+      "currency": "TWD"
+    },
+    {
+      "origin": "KHH",
+      "destination": "FUK",
+      "return": true,
+      "note": "round-trip south",
+      "outcome": "success",
+      "offer_count": 1,
+      "lowest_price_twd": 29398,
+      "primary_airline": "長榮航空",
+      "currency": "TWD"
+    }
+  ]
+}

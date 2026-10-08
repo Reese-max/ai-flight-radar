@@ -14,7 +14,7 @@ from typing import List, Optional
 from config.settings import settings
 from providers.base import BaseFlightProvider, StandardFlightOffer
 from providers.rate_limiter import rate_limiter
-from providers.fli_custom.errors import FliProviderError
+from providers.fli_custom.errors import FliProviderError, FliSearchError
 from providers.fli_custom import mapper
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,30 @@ def _load_engine():
             PassengerInfo, SeatType, TripType, SearchFlights)
 
 
+class _FlightResponseClient:
+    """Preserve the upstream request budget while refusing absent wire payloads."""
+
+    def __init__(self, client):
+        self.client = client
+
+    def post(self, *args, **kwargs):
+        from fli.search._wire import parse_first_wrb_payload
+
+        response = self.client.post(*args, **kwargs)
+        response.raise_for_status()
+        payload = parse_first_wrb_payload(response.text)
+        if not isinstance(payload, list) or len(payload) < 4:
+            raise FliSearchError("Unsupported flight response frame")
+        buckets = payload[2:4]
+        if (all(bucket is None for bucket in buckets)
+                or any(bucket is not None and (
+                    not isinstance(bucket, list) or not bucket
+                    or not isinstance(bucket[0], list)
+                ) for bucket in buckets)):
+            raise FliSearchError("Unsupported flight response buckets")
+        return response
+
+
 class FliCustomProvider(BaseFlightProvider):
     name = "fli_custom"
 
@@ -55,18 +79,46 @@ class FliCustomProvider(BaseFlightProvider):
     def _fetch(self, filters):
         """Isolated engine call — tests monkeypatch this, never the network."""
         *_models, SearchFlights = _load_engine()
-        return SearchFlights().search(
+        engine = SearchFlights()
+        engine.client = _FlightResponseClient(engine.client)
+        return engine.search(
             filters, top_n=TOP_N,
             currency=self.currency, language=self.language, country=self.country)
 
     def search(self, origin: str, destination: str, depart_date: str,
-               return_date: Optional[str] = None, max_stops: int = 0
+               return_date: Optional[str] = None, max_stops: int = 0,
+               cabin: str = "ECONOMY", adults: int = 1,
+               airlines: Optional[List[str]] = None
                ) -> List[StandardFlightOffer]:
         try:
+            if type(max_stops) is not int or max_stops not in (0, 1, 2):
+                raise ValueError("max_stops must be between 0 and 2")
+            if type(adults) is not int or adults < 1:
+                raise ValueError("adults must be a positive integer")
+            if not isinstance(cabin, str):
+                raise ValueError("cabin must be a supported string")
+            if airlines is not None and (
+                not isinstance(airlines, list)
+                or any(not isinstance(code, str) for code in airlines)
+            ):
+                raise ValueError("airlines must be a list of IATA strings")
             (Airport, FlightSearchFilters, FlightSegment, MaxStops,
              PassengerInfo, SeatType, TripType, _search) = _load_engine()
-            stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER}.get(
-                max_stops, MaxStops.TWO_OR_FEWER_STOPS)
+            from fli.models import Airline
+            stops = {0: MaxStops.NON_STOP, 1: MaxStops.ONE_STOP_OR_FEWER,
+                     2: MaxStops.TWO_OR_FEWER_STOPS}[max_stops]
+            try:
+                seat = SeatType[cabin.strip().upper()]
+            except KeyError:
+                raise ValueError(f"Unknown cabin: {cabin!r}")
+            mapped_airlines = None
+            if airlines is not None:
+                try:
+                    codes = [code.strip().upper() for code in airlines]
+                    mapped_airlines = [Airline["_" + code if code[:1].isdigit() else code]
+                                       for code in codes]
+                except KeyError:
+                    raise ValueError("Unknown airline code")
             segments = [FlightSegment(departure_airport=[[Airport[origin], 0]],
                                       arrival_airport=[[Airport[destination], 0]],
                                       travel_date=depart_date)]
@@ -76,8 +128,13 @@ class FliCustomProvider(BaseFlightProvider):
                                               travel_date=return_date))
             filters = FlightSearchFilters(
                 trip_type=TripType.ROUND_TRIP if return_date else TripType.ONE_WAY,
-                passenger_info=PassengerInfo(adults=1),
-                flight_segments=segments, stops=stops, seat_type=SeatType.ECONOMY)
+                passenger_info=PassengerInfo(adults=adults),
+                flight_segments=segments, stops=stops, seat_type=seat,
+                airlines=mapped_airlines)
+        except (ImportError, OSError) as exc:
+            raise FliSearchError(
+                f"Fli search engine unavailable ({type(exc).__name__})"
+            ) from exc
         except (KeyError, ValueError, TypeError) as exc:
             raise FliProviderError(f"Cannot build search filters: {type(exc).__name__}") from exc
 
@@ -86,7 +143,7 @@ class FliCustomProvider(BaseFlightProvider):
             raw = self._fetch(filters)
         except Exception as exc:
             rate_limiter.record_error()
-            raise FliProviderError(
+            raise FliSearchError(
                 f"Upstream search failed ({type(exc).__name__}); no price observation recorded"
             ) from exc
 
@@ -106,6 +163,6 @@ class FliCustomProvider(BaseFlightProvider):
                 logger.warning("Rejected malformed Fli result: %s", type(exc).__name__)
         if not offers:
             rate_limiter.record_error()
-            raise FliProviderError("Upstream returned results, but none could be validated")
+            raise FliSearchError("Upstream returned results, but none could be validated")
         rate_limiter.record_success()
         return sorted(offers, key=lambda offer: offer.price_twd)
