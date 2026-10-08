@@ -6,12 +6,13 @@ CAPTCHA bypass, automatic retry loop, or notification sending is implemented.
 """
 from __future__ import annotations
 import argparse
-from datetime import date
+from datetime import date, datetime
 import json
 import os
 from pathlib import Path
 import re
 import site
+import socket
 import subprocess
 import sys
 import time
@@ -25,9 +26,103 @@ ROOT = Path(__file__).resolve().parents[2]
 ORIGINS = {'TPE', 'TSA', 'KHH', 'RMQ'}
 DESTINATIONS = {'NRT','HND','KIX','FUK','KMJ','KOJ','OKA','NGO','CTS','SDJ','OKJ','TAK'}
 SEARCH_PROVIDERS = {'fast_flights', 'fli', 'fli_custom'}
+ERROR_TYPES = frozenset({
+    'RATE_LIMITED', 'UPSTREAM_CHANGED', 'PARSE_FAILED', 'TIMEOUT',
+    'BLOCKED', 'SOURCE_UNAVAILABLE', 'UNKNOWN',
+})
+TIMESTAMP_PATTERN = re.compile(
+    r'^20\d{2}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$')
 
 class SafeFailure(RuntimeError):
     """A deliberately sanitized message suitable for CI logs."""
+
+class AdmissionBlocked(SafeFailure):
+    """The calibration receipt does not admit a provider query."""
+
+class ClassifiedFailure(SafeFailure):
+    def __init__(self, error_type: str):
+        if error_type not in ERROR_TYPES:
+            error_type = 'UNKNOWN'
+        self.error_type = error_type
+        super().__init__('Collection failed')
+
+def error_result(error_type: str = 'UNKNOWN') -> dict:
+    """Return the only provider-failure shape allowed across the process boundary."""
+    safe_type = error_type if isinstance(error_type,str) and error_type in ERROR_TYPES else 'UNKNOWN'
+    return {'outcome':'error','error_type':safe_type}
+
+def _failure_chain(exc: BaseException) -> tuple[BaseException, ...]:
+    """Collect typed causes without inspecting or serializing exception messages."""
+    try:
+        from providers.selector import ProviderChainError
+    except ImportError:
+        ProviderChainError = ()
+    pending = [exc]
+    seen = set()
+    failures = []
+    while pending and len(failures) < 16:
+        current = pending.pop(0)
+        if not isinstance(current,BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current));failures.append(current)
+        cause = current.__cause__ or current.__context__
+        if isinstance(cause,BaseException):
+            pending.append(cause)
+        if isinstance(current,urllib.error.URLError) and isinstance(current.reason,BaseException):
+            pending.append(current.reason)
+        declared_failures = current.failures if isinstance(current,ProviderChainError) else ()
+        if isinstance(declared_failures,(tuple,list)):
+            for item in declared_failures[:8]:
+                if isinstance(item,(tuple,list)) and len(item)==2 and isinstance(item[1],BaseException):
+                    pending.append(item[1])
+    return tuple(failures)
+
+def classify_failure(exc: BaseException) -> str:
+    """Map typed exception structure to a bounded enum; never inspect messages."""
+    failures = _failure_chain(exc)
+    declared = next((failure.error_type for failure in failures
+        if isinstance(failure,ClassifiedFailure)), None)
+    if declared:
+        return declared
+    if any(isinstance(failure,AdmissionBlocked) for failure in failures):
+        return 'BLOCKED'
+    try:
+        # The vendored Fli package adds its root to sys.path before it can raise
+        # these.  Do not mutate import paths here merely to classify a failure.
+        from fli.search.exceptions import SearchConnectionError, SearchHTTPError, SearchTimeoutError
+    except ImportError:
+        SearchConnectionError = SearchHTTPError = SearchTimeoutError = ()
+    if any(isinstance(failure,SearchTimeoutError) for failure in failures):
+        return 'TIMEOUT'
+    if any(isinstance(failure,(TimeoutError,socket.timeout,subprocess.TimeoutExpired)) for failure in failures):
+        return 'TIMEOUT'
+    statuses = [failure.code for failure in failures if isinstance(failure,urllib.error.HTTPError)]
+    statuses.extend(failure.status_code for failure in failures
+                    if isinstance(failure,SearchHTTPError) and type(failure.status_code) is int)
+    if 429 in statuses:
+        return 'RATE_LIMITED'
+    if any(status in (401,403) for status in statuses):
+        return 'BLOCKED'
+    if any(status in (404,410) for status in statuses):
+        return 'UPSTREAM_CHANGED'
+    if any(500 <= status <= 599 for status in statuses):
+        return 'SOURCE_UNAVAILABLE'
+    if any(isinstance(failure,(json.JSONDecodeError,ValueError,TypeError,KeyError,IndexError,AttributeError))
+           for failure in failures):
+        return 'PARSE_FAILED'
+    if any(isinstance(failure,SearchConnectionError) for failure in failures):
+        return 'SOURCE_UNAVAILABLE'
+    if any(isinstance(failure,(OSError,urllib.error.URLError,ConnectionError,ImportError)) for failure in failures):
+        return 'SOURCE_UNAVAILABLE'
+    try:
+        from providers.base import ProviderSearchError
+    except ImportError:
+        ProviderSearchError = ()
+    if any(isinstance(failure,ProviderSearchError) for failure in failures):
+        return 'UNKNOWN'
+    if any(isinstance(failure,SafeFailure) for failure in failures):
+        return 'PARSE_FAILED'
+    return 'UNKNOWN'
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -49,6 +144,7 @@ class Client:
         if role not in {'collector','admin'}:
             raise SafeFailure('Invalid client role')
         self.key,self.role = key,role
+        self.error_types_supported = False
         self.opener = urllib.request.build_opener(NoRedirect())
 
     def call(self, path: str, data: dict | None = None) -> dict:
@@ -90,6 +186,9 @@ class Client:
         health = self.call('/api/health')
         if health.get('app_id') != 'reese-max/ai-flight-radar:cloudflare-v1' or health.get('schema_version') != 1:
             raise SafeFailure('Radar identity/schema mismatch')
+        capabilities = health.get('capabilities')
+        self.error_types_supported = (isinstance(capabilities,dict)
+            and capabilities.get('collector_error_types') == 1)
 
 def validate_task(task: dict) -> dict:
     if not isinstance(task,dict) or not re.fullmatch(r'[a-f0-9]{64}',str(task.get('id',''))):
@@ -126,14 +225,41 @@ def search_subprocess(task: dict) -> dict:
     try:
         result = subprocess.run([sys.executable,str(Path(__file__).with_name('search_once.py'))],
             input=json.dumps(task),text=True,capture_output=True,timeout=90,env=child_env,cwd=ROOT,check=False)
-        if result.returncode != 0 or len(result.stdout) > 16384:
-            return {'outcome':'error'}
-        payload = json.loads(result.stdout)
-        if not isinstance(payload,dict) or payload.get('outcome') not in {'ok','empty','error'}:
-            return {'outcome':'error'}
-        return payload
-    except (subprocess.TimeoutExpired,OSError,ValueError):
-        return {'outcome':'error'}
+        if result.returncode != 0:
+            return error_result('SOURCE_UNAVAILABLE')
+        if len(result.stdout) > 16384:
+            return error_result('PARSE_FAILED')
+        return normalize_search_result(json.loads(result.stdout))
+    except (subprocess.TimeoutExpired,OSError,ValueError) as exc:
+        return error_result(classify_failure(exc))
+
+def normalize_search_result(payload) -> dict:
+    """Return a bounded result shape and discard every provider-specific field."""
+    if not isinstance(payload,dict) or payload.get('outcome') not in {'ok','empty','error'}:
+        return error_result('PARSE_FAILED')
+    if payload['outcome']=='error':
+        return error_result(payload.get('error_type','UNKNOWN'))
+    if 'error_type' in payload:
+        return error_result('PARSE_FAILED')
+    if payload['outcome']=='empty':
+        return {'outcome':'empty'}
+    price, searched_at = payload.get('price_twd'), payload.get('searched_at')
+    airline, offer_count = payload.get('airline'), payload.get('offer_count')
+    if not isinstance(searched_at,str) or not TIMESTAMP_PATTERN.fullmatch(searched_at):
+        return error_result('PARSE_FAILED')
+    try:
+        parsed_at = datetime.fromisoformat(searched_at.replace('Z','+00:00'))
+    except (AttributeError,TypeError,ValueError):
+        return error_result('PARSE_FAILED')
+    valid = (type(price) is int and 1 <= price <= 1000000
+        and parsed_at.tzinfo is not None
+        and (airline is None or (isinstance(airline,str) and 1 <= len(airline) <= 120
+            and not any(ord(character) < 32 for character in airline)))
+        and type(offer_count) is int and 1 <= offer_count <= 1000)
+    if not valid:
+        return error_result('PARSE_FAILED')
+    return {'outcome':'ok','price_twd':price,'searched_at':searched_at,
+        'airline':airline,'offer_count':offer_count}
 
 def cron_runs_per_hour(expression: str) -> int:
     """Scheduled runs per hour for a cron expression that fires every day.
@@ -315,7 +441,7 @@ def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.s
     if type(max_tasks) is not int or not 1 <= max_tasks <= 3:
         raise SafeFailure('A batch must contain 1-3 tasks')
     client.verify()
-    summary = {'run_id':str(uuid.uuid4()),'attempted':0,'observed':0,'errors':0}
+    summary = {'run_id':str(uuid.uuid4()),'attempted':0,'observed':0,'errors':0,'error_types':{}}
     for i in range(max_tasks):
         response = client.call('/api/collector/claim',{'run_id':summary['run_id']})
         if response.get('task') is None:
@@ -324,14 +450,17 @@ def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.s
         summary['attempted'] += 1
         try:
             payload = search(task)
-        except Exception:
-            payload = {'outcome':'error'}
-        if not isinstance(payload,dict) or payload.get('outcome') not in {'ok','empty','error'}:
-            payload = {'outcome':'error'}
-        # Client code cannot let a provider override the task or credential context.
-        payload = {k:v for k,v in payload.items() if k in {'outcome','price_twd','searched_at','airline','offer_count'}}
+        except Exception as exc:
+            payload = error_result(classify_failure(exc))
+        payload = normalize_search_result(payload)
+        if payload['outcome']=='error':
+            error_type = payload['error_type']
+            summary['error_types'][error_type] = summary['error_types'].get(error_type,0)+1
         payload.update(task_id=task['id'],lease_token=task['lease_token'])
-        accepted = client.call('/api/collector/result',payload)
+        wire_payload = dict(payload)
+        if payload['outcome']=='error' and not getattr(client,'error_types_supported',False):
+            wire_payload.pop('error_type')
+        accepted = client.call('/api/collector/result',wire_payload)
         if accepted.get('status') != 'accepted':
             raise SafeFailure('Result was not accepted')
         if payload['outcome']=='ok':
@@ -341,8 +470,21 @@ def run_batch(client, search=search_subprocess, max_tasks: int = 3, pause=time.s
             break  # Do not keep searching after an upstream failure/possible limit.
         if i+1 < max_tasks:
             pause(4)
-    client.call('/api/collector/report',summary)
+    wire_summary = dict(summary)
+    if not getattr(client,'error_types_supported',False):
+        wire_summary.pop('error_types')
+    client.call('/api/collector/report',wire_summary)
     return summary
+
+def require_calibration_admission() -> None:
+    gate = ROOT / 'cloudflare' / 'scripts' / 'calibration-gate.mjs'
+    try:
+        result = subprocess.run(['node',str(gate),'--require-admitted'],capture_output=True,
+            text=True,timeout=10,check=False,cwd=ROOT)
+    except (OSError,subprocess.TimeoutExpired):
+        raise ClassifiedFailure('SOURCE_UNAVAILABLE') from None
+    if result.returncode != 0:
+        raise AdmissionBlocked('Current calibration decision does not admit collection')
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -360,6 +502,7 @@ def main() -> int:
         return 0
     if os.getenv('RADAR_COLLECTOR_ENABLED') != 'true':
         raise SafeFailure('RADAR_COLLECTOR_ENABLED must explicitly be true')
+    require_calibration_admission()
     client = Client(os.getenv('RADAR_URL',''),os.getenv('RADAR_COLLECTOR_KEY',''))
     result = run_batch(client,max_tasks=args.max_tasks)
     print(json.dumps(result))

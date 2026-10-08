@@ -39,9 +39,13 @@ def simulate(**overrides):
     return collector().simulate_coverage(**arguments)
 
 
-def test_seeded_route_matrix_is_the_active_task_count_of_the_contract():
+def test_calibrated_seed_matrix_fits_within_the_capacity_contract():
     from tasks import ROUTES
-    assert len(ROUTES) == plan()['active_routes'] == 48
+    # The capacity contract remains conservative for the full 4x12 product
+    # matrix, while the fail-closed calibration plan admits only the 16
+    # pre-registered routes covered by its bounded 48-attempt protocol.
+    assert len(ROUTES) == 16
+    assert len(ROUTES) <= plan()['active_routes'] == 48
 
 
 def test_checked_in_configuration_is_sustainable():

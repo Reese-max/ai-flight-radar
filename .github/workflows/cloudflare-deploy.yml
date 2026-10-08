@@ -33,6 +33,8 @@ jobs:
           CF_RADAR_DATABASE_ID: ${{ vars.CF_RADAR_DATABASE_ID || secrets.CF_RADAR_DATABASE_ID }}
           CF_RADAR_ADMIN_KEY: ${{ secrets.CF_RADAR_ADMIN_KEY }}
           CF_RADAR_COLLECTOR_KEY: ${{ secrets.CF_RADAR_COLLECTOR_KEY }}
+          CF_RADAR_COLLECTOR_ENABLED: ${{ vars.CF_RADAR_COLLECTOR_ENABLED }}
+          CF_RADAR_SEED_ENABLED: ${{ vars.CF_RADAR_SEED_ENABLED }}
         run: node cloudflare/scripts/deployment-preflight.mjs --require-ready
       - name: Install and test without deployment secrets
         working-directory: cloudflare

@@ -20,7 +20,8 @@ export function createHandler(clock=Date.now){
       if(p==='/api/ui/access'&&method==='GET')await authorize(request,env,'admin');
       await store.ready(env);
       if(method==='GET'){
-        if(p==='/api/health')return json({status:'ok',app_id:APP_ID,schema_version:1,ui_version:'2.0-cf',demo:false});
+        if(p==='/api/health')return json({status:'ok',app_id:APP_ID,schema_version:1,ui_version:'2.0-cf',demo:false,
+          capabilities:{collector_error_types:1}});
         if(p==='/api/ui/config')return json(await store.config(env,now));
         if(p==='/api/ui/access')return json({authorized:true});
         if(p==='/api/ui/quotes')return json(await store.quotes(env.DB,url.searchParams,now));
@@ -32,7 +33,7 @@ export function createHandler(clock=Date.now){
         const data=await bodyJSON(request);
         if(p==='/api/ui/parse'){record(data,['query']);return json(parseIntent(data.query,now));}
         if(p==='/api/scan/trigger')return json(await store.enqueue(env,data,now),202);
-        if(p==='/api/admin/tasks')return json(await store.seed(env.DB,data,now),202);
+        if(p==='/api/admin/tasks')return json(await store.seed(env,data,now),202);
         if(p==='/api/collector/claim')return json(await store.claim(env,data,now));
         if(p==='/api/collector/result')return json(await store.complete(env,data,now));
         if(p==='/api/collector/report')return json(await store.report(env,data,now));
