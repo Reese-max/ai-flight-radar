@@ -167,16 +167,15 @@ class CollectorTests(unittest.TestCase):
             failures=(('fake',TimeoutError('private')),)
         self.assertEqual(classify_failure(Spoofed('private')),'UNKNOWN')
     def test_real_fli_timeout_cause_is_classified(self):
-        from providers.fli_custom.provider import _ensure_fli_path
-        _ensure_fli_path()
-        from fli.search.exceptions import SearchTimeoutError
-        from providers.fli_custom.errors import FliSearchError
-        try:
-            raise SearchTimeoutError('private provider detail')
-        except SearchTimeoutError as cause:
-            wrapped=FliSearchError('sanitized wrapper')
-            wrapped.__cause__=cause
-        self.assertEqual(classify_failure(wrapped),'TIMEOUT')
+        fli_root=Path(__file__).resolve().parents[2]/'third_party'/'fli'
+        with patch.object(sys,'path',[str(fli_root),*sys.path]):
+            from fli.search.exceptions import SearchTimeoutError
+            try:
+                raise SearchTimeoutError('private provider detail')
+            except SearchTimeoutError as cause:
+                wrapped=RuntimeError('sanitized wrapper')
+                wrapped.__cause__=cause
+            self.assertEqual(classify_failure(wrapped),'TIMEOUT')
     def test_child_does_not_receive_application_or_github_secrets(self):
         captured={}
         def fake(*a,**k):captured.update(k);return SimpleNamespace(returncode=0,stdout='{"outcome":"empty"}')
