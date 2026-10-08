@@ -167,12 +167,17 @@ class CollectorTests(unittest.TestCase):
             failures=(('fake',TimeoutError('private')),)
         self.assertEqual(classify_failure(Spoofed('private')),'UNKNOWN')
     def test_real_fli_timeout_cause_is_classified(self):
-        fli_root=Path(__file__).resolve().parents[2]/'third_party'/'fli'
-        with patch.object(sys,'path',[str(fli_root),*sys.path]):
-            from fli.search.exceptions import SearchTimeoutError
+        import importlib.util
+        exceptions_path=Path(__file__).resolve().parents[2]/'third_party'/'fli'/'fli'/'search'/'exceptions.py'
+        spec=importlib.util.spec_from_file_location('fli.search.exceptions',exceptions_path)
+        exceptions=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(exceptions)
+        fli=ModuleType('fli');fli.__path__=[]
+        search=ModuleType('fli.search');search.__path__=[]
+        with patch.dict(sys.modules,{'fli':fli,'fli.search':search,'fli.search.exceptions':exceptions}):
             try:
-                raise SearchTimeoutError('private provider detail')
-            except SearchTimeoutError as cause:
+                raise exceptions.SearchTimeoutError('private provider detail')
+            except exceptions.SearchTimeoutError as cause:
                 wrapped=RuntimeError('sanitized wrapper')
                 wrapped.__cause__=cause
             self.assertEqual(classify_failure(wrapped),'TIMEOUT')
